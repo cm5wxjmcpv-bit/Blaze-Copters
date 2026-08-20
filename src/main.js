@@ -1,23 +1,154 @@
 import { DIFFICULTIES, HELICOPTER_COLORS } from './game/config.js';
-import { createRoom, chooseColor, canStart } from './game/room-state.js';
 import { BlazeSimulation } from './game/simulation.js';
 import { attachJoystick } from './ui/joystick.js';
 import { drawSimulation } from './ui/render.js';
 
 const app = document.querySelector('#app');
+const storedPlayerId = sessionStorage.getItem('blaze-copters-player-id');
+const playerId = storedPlayerId || crypto.randomUUID();
+sessionStorage.setItem('blaze-copters-player-id', playerId);
+
 const session = {
-  playerId: crypto.randomUUID(),
+  playerId,
   room: null,
+  ws: null,
   sim: null,
+  view: 'home',
+  intentionalLeave: false,
   input: { x: 0, y: 0 },
 };
 
-const makeRoomCode = () => {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  return Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-};
+const escapeHtml = (value) => String(value ?? '')
+  .replaceAll('&', '&amp;')
+  .replaceAll('<', '&lt;')
+  .replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;')
+  .replaceAll("'", '&#039;');
 
-function homeScreen() {
+const requestedRoomCode = () => (new URLSearchParams(location.search).get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+
+function setRoomQuery(code) {
+  const url = new URL(location.href);
+  if (code) url.searchParams.set('room', code);
+  else url.searchParams.delete('room');
+  history.replaceState({}, '', url);
+}
+
+function sendRoomMessage(type, payload = {}) {
+  if (session.ws?.readyState !== WebSocket.OPEN) return false;
+  session.ws.send(JSON.stringify({ type, ...payload }));
+  return true;
+}
+
+async function roomExists(code) {
+  const response = await fetch(`/api/rooms/${encodeURIComponent(code)}/state`, { cache: 'no-store' });
+  return response.ok;
+}
+
+async function createOnlineRoom(name) {
+  const response = await fetch('/api/rooms', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ hostId: session.playerId, hostName: name }),
+  });
+  if (!response.ok) throw new Error('Could not create a room.');
+  const data = await response.json();
+  return data.code;
+}
+
+function applyRoomState(room) {
+  session.room = room;
+  if (!room) return;
+
+  if (room.phase === 'playing') {
+    if (session.view !== 'game') gameScreen();
+    return;
+  }
+
+  if (room.phase === 'lobby') lobbyScreen();
+}
+
+function connectToRoom(code, name) {
+  return new Promise((resolve, reject) => {
+    if (session.ws) {
+      session.intentionalLeave = true;
+      session.ws.close();
+      session.ws = null;
+    }
+
+    session.intentionalLeave = false;
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const params = new URLSearchParams({ playerId: session.playerId, name });
+    const ws = new WebSocket(`${protocol}//${location.host}/api/rooms/${code}/ws?${params}`);
+    session.ws = ws;
+    let settled = false;
+
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error('Room connection timed out.'));
+        ws.close();
+      }
+    }, 8000);
+
+    ws.addEventListener('message', (event) => {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+
+      if (message.type === 'state') {
+        applyRoomState(message.room);
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeout);
+          resolve();
+        }
+        return;
+      }
+
+      if (message.type === 'input') {
+        session.sim?.setInput(message.playerId, message.x, message.y);
+        return;
+      }
+
+      if (message.type === 'error') {
+        window.alert(message.message || 'Room error');
+      }
+    });
+
+    ws.addEventListener('error', () => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timeout);
+        reject(new Error('Could not connect to that room.'));
+      }
+    });
+
+    ws.addEventListener('close', () => {
+      clearTimeout(timeout);
+      if (session.ws === ws) session.ws = null;
+      if (!settled) {
+        settled = true;
+        reject(new Error('Could not connect to that room.'));
+      }
+      if (!session.intentionalLeave && session.view !== 'home') {
+        session.room = null;
+        session.sim = null;
+        setRoomQuery('');
+        homeScreen('Connection to the room was lost. You can create or join again.');
+      }
+    });
+  });
+}
+
+function homeScreen(message = '') {
+  session.view = 'home';
+  session.sim = null;
+  const prefillCode = requestedRoomCode();
+
   app.innerHTML = `
     <section class="screen">
       <div class="card stack">
@@ -30,86 +161,138 @@ function homeScreen() {
         </label>
         <button id="create-game">Create Game</button>
         <div class="row">
-          <input class="grow" id="join-code" maxlength="4" placeholder="ROOM CODE" autocomplete="off" />
-          <button class="secondary" id="join-game" disabled>Join Game</button>
+          <input class="grow" id="join-code" maxlength="4" placeholder="ROOM CODE" autocomplete="off" value="${escapeHtml(prefillCode)}" />
+          <button class="secondary" id="join-game" ${prefillCode.length === 4 ? '' : 'disabled'}>Join Game</button>
         </div>
-        <div class="notice small">Online room joining will turn on after the Cloudflare server is connected. The local host flow is active now so we can build and test the game first.</div>
+        <div id="home-status" class="notice small">${escapeHtml(message || 'Online rooms are live. Create a room here, then join it from another phone, tablet, or computer with the 4-character code.')}</div>
       </div>
     </section>`;
 
-  document.querySelector('#create-game').addEventListener('click', () => {
-    const name = document.querySelector('#player-name').value.trim() || 'Player 1';
-    session.room = createRoom({ roomCode: makeRoomCode(), hostId: session.playerId, hostName: name });
-    lobbyScreen();
+  const nameInput = document.querySelector('#player-name');
+  const codeInput = document.querySelector('#join-code');
+  const joinButton = document.querySelector('#join-game');
+  const createButton = document.querySelector('#create-game');
+  const status = document.querySelector('#home-status');
+
+  codeInput.addEventListener('input', () => {
+    codeInput.value = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+    joinButton.disabled = codeInput.value.length !== 4;
+  });
+
+  createButton.addEventListener('click', async () => {
+    const name = nameInput.value.trim() || 'Player 1';
+    createButton.disabled = true;
+    joinButton.disabled = true;
+    status.textContent = 'Creating online room…';
+    try {
+      const code = await createOnlineRoom(name);
+      setRoomQuery(code);
+      await connectToRoom(code, name);
+    } catch (error) {
+      createButton.disabled = false;
+      joinButton.disabled = codeInput.value.length !== 4;
+      status.textContent = error.message || 'Could not create room.';
+    }
+  });
+
+  joinButton.addEventListener('click', async () => {
+    const name = nameInput.value.trim() || 'Player 1';
+    const code = codeInput.value.toUpperCase();
+    joinButton.disabled = true;
+    createButton.disabled = true;
+    status.textContent = `Looking for room ${code}…`;
+    try {
+      if (!(await roomExists(code))) throw new Error(`Room ${code} was not found.`);
+      setRoomQuery(code);
+      await connectToRoom(code, name);
+    } catch (error) {
+      joinButton.disabled = false;
+      createButton.disabled = false;
+      status.textContent = error.message || 'Could not join room.';
+    }
   });
 }
 
 function lobbyScreen() {
+  session.view = 'lobby';
   const room = session.room;
-  const me = room.players.find((p) => p.id === session.playerId);
-  const takenColors = new Set(room.players.filter((p) => p.id !== me.id).map((p) => p.colorId));
+  if (!room) return homeScreen();
+
+  const activePlayers = room.players.filter((player) => player.connected !== false);
+  const me = activePlayers.find((player) => player.id === session.playerId);
+  if (!me) return;
+
+  const takenColors = new Set(activePlayers.filter((player) => player.id !== me.id).map((player) => player.colorId).filter(Boolean));
   const joinUrl = `${location.origin}${location.pathname}?room=${room.roomCode}`;
+  const canStart = me.isHost && activePlayers.length >= 1 && activePlayers.every((player) => player.colorId);
 
   app.innerHTML = `
     <section class="screen">
       <div class="card stack">
         <div class="badge">${me.isHost ? 'HOST' : 'PLAYER'}</div>
-        <div class="room-code">${room.roomCode}</div>
-        <div class="join-url">${joinUrl}</div>
-        <div class="notice small">QR code will be generated from this join link after the online hostname is deployed.</div>
+        <div class="room-code">${escapeHtml(room.roomCode)}</div>
+        <div class="join-url">${escapeHtml(joinUrl)}</div>
+        <div class="notice small">Online lobby connected. Share the room code or link. Up to 6 players can join.</div>
 
         <label>Difficulty
           <select id="difficulty" ${me.isHost ? '' : 'disabled'}>
-            ${Object.entries(DIFFICULTIES).map(([id, value]) => `<option value="${id}" ${room.difficulty === id ? 'selected' : ''}>${value.label}</option>`).join('')}
+            ${Object.entries(DIFFICULTIES).map(([id, value]) => `<option value="${id}" ${room.difficulty === id ? 'selected' : ''}>${escapeHtml(value.label)}</option>`).join('')}
           </select>
         </label>
 
         <div>
           <strong>Choose your helicopter</strong>
           <div class="colors" style="margin-top:10px">
-            ${HELICOPTER_COLORS.map((color) => `<button aria-label="${color.label}" data-color="${color.id}" class="color-button ${me.colorId === color.id ? 'selected' : ''} ${takenColors.has(color.id) ? 'taken' : ''}" style="background:${color.value}" ${takenColors.has(color.id) ? 'disabled' : ''}></button>`).join('')}
+            ${HELICOPTER_COLORS.map((color) => `<button aria-label="${escapeHtml(color.label)}" data-color="${color.id}" class="color-button ${me.colorId === color.id ? 'selected' : ''} ${takenColors.has(color.id) ? 'taken' : ''}" style="background:${color.value}" ${takenColors.has(color.id) ? 'disabled' : ''}></button>`).join('')}
           </div>
         </div>
 
         <div>
-          <strong>Players (${room.players.length}/6)</strong>
+          <strong>Players (${activePlayers.length}/6)</strong>
           <div class="players" style="margin-top:10px">
-            ${room.players.map((player) => {
-              const color = HELICOPTER_COLORS.find((c) => c.id === player.colorId);
-              return `<div class="player-chip"><span class="swatch" style="background:${color?.value || 'transparent'};border:1px solid rgba(255,255,255,.3)"></span><span>${player.name}${player.isHost ? ' ★' : ''}</span></div>`;
+            ${activePlayers.map((player) => {
+              const color = HELICOPTER_COLORS.find((item) => item.id === player.colorId);
+              return `<div class="player-chip"><span class="swatch" style="background:${color?.value || 'transparent'};border:1px solid rgba(255,255,255,.3)"></span><span>${escapeHtml(player.name)}${player.isHost ? ' ★' : ''}</span></div>`;
             }).join('')}
           </div>
         </div>
 
-        ${me.isHost ? `<button id="start-game" ${canStart(room, me.id) ? '' : 'disabled'}>Start Mission</button>` : `<div class="notice">Waiting for host to start…</div>`}
+        ${me.isHost ? `<button id="start-game" ${canStart ? '' : 'disabled'}>Start Mission</button>` : `<div class="notice">Waiting for host to start…</div>`}
+        <div class="notice small">Room joining, player list, colors, difficulty, and mission start now sync through Cloudflare. Full authoritative fire/game-state synchronization is the next multiplayer step.</div>
         <button class="secondary" id="leave-game">Leave</button>
       </div>
     </section>`;
 
   document.querySelectorAll('[data-color]').forEach((button) => {
     button.addEventListener('click', () => {
-      chooseColor(room, session.playerId, button.dataset.color);
-      lobbyScreen();
+      sendRoomMessage('setColor', { colorId: button.dataset.color });
     });
   });
 
   document.querySelector('#difficulty')?.addEventListener('change', (event) => {
-    room.difficulty = event.target.value;
+    sendRoomMessage('setDifficulty', { difficulty: event.target.value });
   });
 
   document.querySelector('#start-game')?.addEventListener('click', () => {
-    room.phase = 'playing';
-    gameScreen();
+    sendRoomMessage('start');
   });
 
   document.querySelector('#leave-game').addEventListener('click', () => {
+    session.intentionalLeave = true;
+    sendRoomMessage('leave');
+    setTimeout(() => session.ws?.close(), 80);
     session.room = null;
+    session.sim = null;
+    setRoomQuery('');
     homeScreen();
   });
 }
 
 function gameScreen() {
+  session.view = 'game';
   const room = session.room;
+  const activePlayers = room.players.filter((player) => player.connected !== false);
+
   app.innerHTML = `
     <section class="game-screen">
       <canvas id="game-canvas"></canvas>
@@ -140,12 +323,14 @@ function gameScreen() {
   resize();
 
   const rect = canvas.getBoundingClientRect();
-  session.sim = new BlazeSimulation({ width: rect.width, height: rect.height, players: room.players, difficulty: room.difficulty, round: room.round });
+  session.sim = new BlazeSimulation({ width: rect.width, height: rect.height, players: activePlayers, difficulty: room.difficulty, round: room.round });
   window.addEventListener('resize', resize, { passive: true });
 
   const setInput = (x, y) => {
-    session.input.x = x; session.input.y = y;
+    session.input.x = x;
+    session.input.y = y;
     session.sim?.setInput(session.playerId, x, y);
+    sendRoomMessage('input', { x, y });
   };
 
   attachJoystick(document.querySelector('#joystick'), document.querySelector('#joystick-knob'), setInput);
@@ -160,12 +345,12 @@ function gameScreen() {
   window.onkeyup = (event) => { keys.delete(event.code); refreshKeyboard(); };
 
   const loop = (now) => {
-    if (!session.sim) return;
+    if (!session.sim || session.view !== 'game') return;
     session.sim.tick(now);
     drawSimulation(ctx, session.sim);
-    const mine = session.sim.helicopters.find((h) => h.id === session.playerId);
+    const mine = session.sim.helicopters.find((helicopter) => helicopter.id === session.playerId);
     document.querySelector('#fire-hud').textContent = `Fires ${session.sim.fires.length}`;
-    document.querySelector('#water-hud').textContent = `Water ${Math.round((mine.water / mine.capacity) * 100)}%`;
+    if (mine) document.querySelector('#water-hud').textContent = `Water ${Math.round((mine.water / mine.capacity) * 100)}%`;
     const seconds = Math.ceil(session.sim.timeLeft);
     document.querySelector('#time-hud').textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
@@ -179,8 +364,11 @@ function gameScreen() {
 }
 
 function endRoundScreen() {
+  session.view = 'round-end';
   const sim = session.sim;
   const choices = sim.upgradeChoices();
+  const me = session.room.players.find((player) => player.id === session.playerId);
+
   app.innerHTML = `
     <section class="screen">
       <div class="card stack">
@@ -190,21 +378,33 @@ function endRoundScreen() {
           <div class="notice grow"><strong>${sim.fires.length}</strong><br><span class="small">fires still burning</span></div>
         </div>
         <h3 style="margin-bottom:0">Team Upgrade Vote</h3>
-        <p class="small">Two choices per round. Online mode will collect one vote from every connected player.</p>
+        <p class="small">Upgrade voting is still local in this prototype. Shared server-side voting will be connected with the authoritative game state.</p>
         <div class="row">
-          ${choices.map((choice) => `<button class="grow upgrade-choice" data-upgrade="${choice.id}">${choice.label}<br><span style="font-weight:500">${choice.description}</span></button>`).join('')}
+          ${choices.map((choice) => `<button class="grow upgrade-choice" data-upgrade="${choice.id}">${escapeHtml(choice.label)}<br><span style="font-weight:500">${escapeHtml(choice.description)}</span></button>`).join('')}
         </div>
-        <button class="secondary" id="lobby-button">Return to Lobby</button>
+        ${me?.isHost ? '<button class="secondary" id="lobby-button">Return Everyone to Lobby</button>' : '<button class="secondary" id="leave-round">Leave Room</button>'}
       </div>
     </section>`;
 
   document.querySelectorAll('.upgrade-choice').forEach((button) => {
     button.addEventListener('click', () => {
-      session.room.round += 1;
-      gameScreen();
+      sim.applyUpgrade(button.dataset.upgrade);
     }, { once: true });
   });
-  document.querySelector('#lobby-button').addEventListener('click', lobbyScreen);
+
+  document.querySelector('#lobby-button')?.addEventListener('click', () => {
+    sendRoomMessage('returnLobby');
+  });
+
+  document.querySelector('#leave-round')?.addEventListener('click', () => {
+    session.intentionalLeave = true;
+    sendRoomMessage('leave');
+    setTimeout(() => session.ws?.close(), 80);
+    session.room = null;
+    session.sim = null;
+    setRoomQuery('');
+    homeScreen();
+  });
 }
 
 homeScreen();
