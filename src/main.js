@@ -16,8 +16,8 @@ const session = {
   view: 'home',
   intentionalLeave: false,
   input: { x: 0, y: 0 },
-  upgrades: { tank: 0, speed: 0, power: 0 },
   resizeHandler: null,
+  lastSnapshotSent: 0,
 };
 
 const escapeHtml = (value) => String(value ?? '')
@@ -27,7 +27,22 @@ const escapeHtml = (value) => String(value ?? '')
   .replaceAll('"', '&quot;')
   .replaceAll("'", '&#039;');
 
-const requestedRoomCode = () => (new URLSearchParams(location.search).get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+const requestedRoomCode = () => (new URLSearchParams(location.search).get('room') || '')
+  .toUpperCase()
+  .replace(/[^A-Z0-9]/g, '')
+  .slice(0, 4);
+
+function roomUpgrades(room = session.room) {
+  return {
+    tank: Math.max(0, Number(room?.upgrades?.tank) || 0),
+    speed: Math.max(0, Number(room?.upgrades?.speed) || 0),
+    power: Math.max(0, Number(room?.upgrades?.power) || 0),
+  };
+}
+
+function isMatchHost() {
+  return Boolean(session.room && session.room.hostId === session.playerId);
+}
 
 function cleanupGameView() {
   if (session.resizeHandler) {
@@ -38,10 +53,7 @@ function cleanupGameView() {
   window.onkeyup = null;
   session.input.x = 0;
   session.input.y = 0;
-}
-
-function resetMissionProgress() {
-  session.upgrades = { tank: 0, speed: 0, power: 0 };
+  session.lastSnapshotSent = 0;
 }
 
 function setRoomQuery(code) {
@@ -79,8 +91,19 @@ function applyRoomState(room) {
 
   if (room.phase === 'playing') {
     const activePlayers = room.players.filter((player) => player.connected !== false);
-    if (session.view !== 'game') gameScreen();
-    else session.sim?.syncPlayers(activePlayers);
+
+    if (session.view === 'round-end' && session.sim?.complete) return;
+
+    if (session.view !== 'game') {
+      gameScreen();
+    } else {
+      session.sim?.syncPlayers(activePlayers);
+    }
+    return;
+  }
+
+  if (room.phase === 'roundEnd') {
+    endRoundScreen();
     return;
   }
 
@@ -133,6 +156,11 @@ function connectToRoom(code, name) {
         return;
       }
 
+      if (message.type === 'matchSnapshot') {
+        if (!isMatchHost()) session.sim?.applySnapshot(message.snapshot);
+        return;
+      }
+
       if (message.type === 'error') window.alert(message.message || 'Room error');
     });
 
@@ -162,11 +190,20 @@ function connectToRoom(code, name) {
   });
 }
 
+function leaveRoom() {
+  session.intentionalLeave = true;
+  sendRoomMessage('leave');
+  setTimeout(() => session.ws?.close(), 80);
+  session.room = null;
+  session.sim = null;
+  setRoomQuery('');
+  homeScreen();
+}
+
 function homeScreen(message = '') {
   cleanupGameView();
   session.view = 'home';
   session.sim = null;
-  resetMissionProgress();
   const prefillCode = requestedRoomCode();
 
   app.innerHTML = `
@@ -184,7 +221,7 @@ function homeScreen(message = '') {
           <input class="grow" id="join-code" maxlength="4" placeholder="ROOM CODE" autocomplete="off" value="${escapeHtml(prefillCode)}" />
           <button class="secondary" id="join-game" ${prefillCode.length === 4 ? '' : 'disabled'}>Join Game</button>
         </div>
-        <div id="home-status" class="notice small">${escapeHtml(message || 'Online rooms are live. Create a room here, then join it from another phone, tablet, or computer with the 4-character code.')}</div>
+        <div id="home-status" class="notice small">${escapeHtml(message || 'Create a room, then join from another phone, tablet, or computer with the 4-character code.')}</div>
       </div>
     </section>`;
 
@@ -201,7 +238,6 @@ function homeScreen(message = '') {
 
   createButton.addEventListener('click', async () => {
     const name = nameInput.value.trim() || 'Player 1';
-    resetMissionProgress();
     createButton.disabled = true;
     joinButton.disabled = true;
     status.textContent = 'Creating online room…';
@@ -219,7 +255,6 @@ function homeScreen(message = '') {
   joinButton.addEventListener('click', async () => {
     const name = nameInput.value.trim() || 'Player 1';
     const code = codeInput.value.toUpperCase();
-    resetMissionProgress();
     joinButton.disabled = true;
     createButton.disabled = true;
     status.textContent = `Looking for room ${code}…`;
@@ -238,6 +273,7 @@ function homeScreen(message = '') {
 function lobbyScreen() {
   cleanupGameView();
   session.view = 'lobby';
+  session.sim = null;
   const room = session.room;
   if (!room) return homeScreen();
 
@@ -245,9 +281,15 @@ function lobbyScreen() {
   const me = activePlayers.find((player) => player.id === session.playerId);
   if (!me) return;
 
-  const takenColors = new Set(activePlayers.filter((player) => player.id !== me.id).map((player) => player.colorId).filter(Boolean));
+  const takenColors = new Set(
+    activePlayers
+      .filter((player) => player.id !== me.id)
+      .map((player) => player.colorId)
+      .filter(Boolean),
+  );
   const joinUrl = `${location.origin}${location.pathname}?room=${room.roomCode}`;
   const canStart = me.isHost && activePlayers.length >= 1 && activePlayers.every((player) => player.colorId);
+  const upgrades = roomUpgrades(room);
 
   app.innerHTML = `
     <section class="screen">
@@ -255,7 +297,7 @@ function lobbyScreen() {
         <div class="badge">${me.isHost ? 'HOST' : 'PLAYER'}</div>
         <div class="room-code">${escapeHtml(room.roomCode)}</div>
         <div class="join-url">${escapeHtml(joinUrl)}</div>
-        <div class="notice small">Online lobby connected. Share the room code or link. Up to 6 players can join.</div>
+        <div class="notice small">Shared multiplayer match connected. Fires, water, helicopter positions, and the round timer are synchronized for the room.</div>
 
         <label>Difficulty
           <select id="difficulty" ${me.isHost ? '' : 'disabled'}>
@@ -280,25 +322,20 @@ function lobbyScreen() {
           </div>
         </div>
 
-        ${me.isHost ? `<button id="start-game" ${canStart ? '' : 'disabled'}>Start Mission</button>` : `<div class="notice">Waiting for host to start…</div>`}
-        <div class="notice small">Core gameplay is being tuned locally first. Shared fire/game-state synchronization will be connected after the local game loop is solid.</div>
+        ${room.round > 1 ? `<div class="notice small">Team upgrades — Water ${upgrades.tank} · Speed ${upgrades.speed} · Effectiveness ${upgrades.power}</div>` : ''}
+        ${me.isHost ? `<button id="start-game" ${canStart ? '' : 'disabled'}>Start Mission</button>` : '<div class="notice">Waiting for host to start…</div>'}
         <button class="secondary" id="leave-game">Leave</button>
       </div>
     </section>`;
 
-  document.querySelectorAll('[data-color]').forEach((button) => button.addEventListener('click', () => sendRoomMessage('setColor', { colorId: button.dataset.color })));
-  document.querySelector('#difficulty')?.addEventListener('change', (event) => sendRoomMessage('setDifficulty', { difficulty: event.target.value }));
-  document.querySelector('#start-game')?.addEventListener('click', () => sendRoomMessage('start'));
-
-  document.querySelector('#leave-game').addEventListener('click', () => {
-    session.intentionalLeave = true;
-    sendRoomMessage('leave');
-    setTimeout(() => session.ws?.close(), 80);
-    session.room = null;
-    session.sim = null;
-    setRoomQuery('');
-    homeScreen();
+  document.querySelectorAll('[data-color]').forEach((button) => {
+    button.addEventListener('click', () => sendRoomMessage('setColor', { colorId: button.dataset.color }));
   });
+  document.querySelector('#difficulty')?.addEventListener('change', (event) => {
+    sendRoomMessage('setDifficulty', { difficulty: event.target.value });
+  });
+  document.querySelector('#start-game')?.addEventListener('click', () => sendRoomMessage('start'));
+  document.querySelector('#leave-game').addEventListener('click', leaveRoom);
 }
 
 function paintWaterHud(hud, percent) {
@@ -360,8 +397,17 @@ function gameScreen() {
   resize();
 
   const rect = canvas.getBoundingClientRect();
-  session.sim = new BlazeSimulation({ width: rect.width, height: rect.height, players: activePlayers, difficulty: room.difficulty, round: room.round, upgrades: session.upgrades });
+  session.sim = new BlazeSimulation({
+    width: rect.width,
+    height: rect.height,
+    players: activePlayers,
+    difficulty: room.difficulty,
+    round: room.round,
+    upgrades: roomUpgrades(room),
+    spawnInitialFires: isMatchHost(),
+  });
   session.resizeHandler = resize;
+  session.lastSnapshotSent = 0;
   window.addEventListener('resize', resize, { passive: true });
 
   const setInput = (x, y) => {
@@ -371,21 +417,45 @@ function gameScreen() {
     sendRoomMessage('input', { x, y });
   };
 
-  attachJoystick(document.querySelector('#joystick'), document.querySelector('#joystick-knob'), setInput);
+  attachJoystick(
+    document.querySelector('#joystick'),
+    document.querySelector('#joystick-knob'),
+    setInput,
+  );
 
   const keys = new Set();
   const refreshKeyboard = () => {
-    const x = (keys.has('ArrowRight') || keys.has('KeyD') ? 1 : 0) - (keys.has('ArrowLeft') || keys.has('KeyA') ? 1 : 0);
-    const y = (keys.has('ArrowDown') || keys.has('KeyS') ? 1 : 0) - (keys.has('ArrowUp') || keys.has('KeyW') ? 1 : 0);
+    const x = (keys.has('ArrowRight') || keys.has('KeyD') ? 1 : 0)
+      - (keys.has('ArrowLeft') || keys.has('KeyA') ? 1 : 0);
+    const y = (keys.has('ArrowDown') || keys.has('KeyS') ? 1 : 0)
+      - (keys.has('ArrowUp') || keys.has('KeyW') ? 1 : 0);
     setInput(x, y);
   };
-  window.onkeydown = (event) => { keys.add(event.code); refreshKeyboard(); };
-  window.onkeyup = (event) => { keys.delete(event.code); refreshKeyboard(); };
+  window.onkeydown = (event) => {
+    keys.add(event.code);
+    refreshKeyboard();
+  };
+  window.onkeyup = (event) => {
+    keys.delete(event.code);
+    refreshKeyboard();
+  };
+
+  const sendSnapshot = (now) => {
+    if (!isMatchHost() || !session.sim) return;
+    sendRoomMessage('matchSnapshot', { snapshot: session.sim.createSnapshot(now) });
+    session.lastSnapshotSent = now;
+  };
 
   const loop = (now) => {
     if (!session.sim || session.view !== 'game') return;
-    session.sim.tick(now);
+
+    if (isMatchHost()) {
+      session.sim.tick(now);
+      if (now - session.lastSnapshotSent >= 70 || session.sim.complete) sendSnapshot(now);
+    }
+
     drawSimulation(ctx, session.sim);
+
     const mine = session.sim.helicopters.find((helicopter) => helicopter.id === session.playerId);
     const fireHud = document.querySelector('#fire-hud');
     const waterHud = document.querySelector('#water-hud');
@@ -394,10 +464,15 @@ function gameScreen() {
 
     fireHud.textContent = `Fires ${session.sim.fires.length}`;
     if (mine) paintWaterHud(waterHud, (mine.water / mine.capacity) * 100);
-    const seconds = Math.ceil(session.sim.timeLeft);
+
+    const seconds = Math.max(0, Math.ceil(session.sim.timeLeft));
     timeHud.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
-    if (session.sim.complete) return endRoundScreen();
+    if (session.sim.complete) {
+      endRoundScreen();
+      return;
+    }
+
     requestAnimationFrame(loop);
   };
   requestAnimationFrame(loop);
@@ -406,52 +481,64 @@ function gameScreen() {
 function endRoundScreen() {
   cleanupGameView();
   session.view = 'round-end';
+
+  const room = session.room;
   const sim = session.sim;
+  if (!room || !sim) return;
+
+  const me = room.players.find((player) => player.id === session.playerId);
   const choices = sim.upgradeChoices();
-  const me = session.room.players.find((player) => player.id === session.playerId);
+  const upgrades = roomUpgrades(room);
+  const selectedChoice = choices.find((choice) => choice.id === room.selectedUpgrade);
+  const serverReady = room.phase === 'roundEnd';
+
+  const choiceButtons = choices.map((choice) => {
+    const disabled = !me?.isHost || !serverReady || Boolean(room.selectedUpgrade);
+    const selected = room.selectedUpgrade === choice.id;
+    return `<button class="grow upgrade-choice" data-upgrade="${choice.id}" ${disabled ? 'disabled' : ''}>
+      ${selected ? '✓ ' : ''}${escapeHtml(choice.label)}<br>
+      <span style="font-weight:500">${escapeHtml(choice.description)}</span><br>
+      <span class="small">Level ${upgrades[choice.id] || 0}${selected ? '' : ` → ${(upgrades[choice.id] || 0) + 1}`}</span>
+    </button>`;
+  }).join('');
+
+  let statusText = 'Syncing round results…';
+  if (serverReady && selectedChoice) statusText = `Team upgrade selected: ${selectedChoice.label}`;
+  else if (serverReady && me?.isHost) statusText = 'Choose one team upgrade to continue.';
+  else if (serverReady) statusText = 'Waiting for the host to choose the team upgrade.';
 
   app.innerHTML = `
     <section class="screen">
       <div class="card stack">
-        <h2 style="margin:0">Round ${session.room.round} Complete</h2>
+        <h2 style="margin:0">Round ${room.round} Complete</h2>
         <div class="row">
           <div class="notice grow"><strong>${sim.extinguished}</strong><br><span class="small">fires extinguished</span></div>
           <div class="notice grow"><strong>${sim.fires.length}</strong><br><span class="small">fires still burning</span></div>
         </div>
-        <h3 style="margin-bottom:0">Choose One Upgrade</h3>
-        <div class="row">
-          ${choices.map((choice) => `<button class="grow upgrade-choice" data-upgrade="${choice.id}">${escapeHtml(choice.label)}<br><span style="font-weight:500">${escapeHtml(choice.description)}</span><br><span class="small">Level ${session.upgrades[choice.id] || 0} → ${(session.upgrades[choice.id] || 0) + 1}</span></button>`).join('')}
-        </div>
-        ${me?.isHost ? '<button class="secondary" id="lobby-button" disabled>Continue</button>' : '<button class="secondary" id="leave-round">Leave Room</button>'}
+        <h3 style="margin-bottom:0">Team Upgrade</h3>
+        <div class="notice small">${escapeHtml(statusText)}</div>
+        <div class="row">${choiceButtons}</div>
+        ${me?.isHost
+          ? `<button class="secondary" id="lobby-button" ${room.selectedUpgrade ? '' : 'disabled'}>Continue</button>`
+          : '<button class="secondary" id="leave-round">Leave Room</button>'}
       </div>
     </section>`;
 
-  let selected = false;
-  document.querySelectorAll('.upgrade-choice').forEach((button) => {
-    button.addEventListener('click', () => {
-      if (selected) return;
-      const id = button.dataset.upgrade;
-      if (!(id in session.upgrades)) return;
-      selected = true;
-      session.upgrades[id] += 1;
-      document.querySelectorAll('.upgrade-choice').forEach((choiceButton) => { choiceButton.disabled = true; });
-      button.textContent = 'Selected';
-      const lobbyButton = document.querySelector('#lobby-button');
-      if (lobbyButton) lobbyButton.disabled = false;
+  if (me?.isHost && serverReady && !room.selectedUpgrade) {
+    document.querySelectorAll('.upgrade-choice').forEach((button) => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('.upgrade-choice').forEach((choiceButton) => {
+          choiceButton.disabled = true;
+        });
+        sendRoomMessage('chooseUpgrade', { upgradeId: button.dataset.upgrade });
+      });
     });
-  });
+  }
 
-  document.querySelector('#lobby-button')?.addEventListener('click', () => sendRoomMessage('returnLobby'));
-
-  document.querySelector('#leave-round')?.addEventListener('click', () => {
-    session.intentionalLeave = true;
-    sendRoomMessage('leave');
-    setTimeout(() => session.ws?.close(), 80);
-    session.room = null;
-    session.sim = null;
-    setRoomQuery('');
-    homeScreen();
+  document.querySelector('#lobby-button')?.addEventListener('click', () => {
+    sendRoomMessage('returnLobby');
   });
+  document.querySelector('#leave-round')?.addEventListener('click', leaveRoom);
 }
 
 homeScreen();
