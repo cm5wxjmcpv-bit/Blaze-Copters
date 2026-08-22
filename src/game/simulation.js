@@ -110,9 +110,13 @@ export class BlazeSimulation {
 
       const overWater = distance(heli, this.water) < this.water.radius;
       if (overWater) {
-        heli.refillProgress = clamp(heli.refillProgress + refillRate * dt, 0, 100);
-        if (heli.refillProgress >= 100) {
-          heli.water = heli.capacity;
+        if (heli.water < heli.capacity) {
+          const waterPerSecond = heli.capacity * (refillRate / 100);
+          heli.water = clamp(heli.water + waterPerSecond * dt, 0, heli.capacity);
+          heli.refillProgress = heli.water >= heli.capacity
+            ? 0
+            : (heli.water / heli.capacity) * 100;
+        } else {
           heli.refillProgress = 0;
         }
       } else {
