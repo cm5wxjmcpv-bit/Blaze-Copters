@@ -3,6 +3,7 @@ import { DurableObject } from "cloudflare:workers";
 const ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const COLOR_IDS = new Set(["red", "blue", "yellow", "green", "purple", "orange"]);
 const DIFFICULTY_IDS = new Set(["easy", "normal", "wildfire"]);
+const UPGRADE_IDS = new Set(["tank", "speed", "power"]);
 
 function makeRoomCode() {
   let code = "";
@@ -26,6 +27,63 @@ function ensureConnectedHost(room) {
   const nextHost = currentHost ?? connectedPlayers(room)[0] ?? null;
   room.hostId = nextHost?.id ?? null;
   for (const player of room.players) player.isHost = player.id === room.hostId;
+}
+
+function clampNumber(value, min, max, fallback = min) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, number));
+}
+
+function sanitizeSnapshot(rawSnapshot, room) {
+  if (!rawSnapshot || Number(rawSnapshot.round) !== room.round) return null;
+
+  const activeIds = new Set(connectedPlayers(room).map((player) => player.id));
+  const fires = Array.isArray(rawSnapshot.fires)
+    ? rawSnapshot.fires.slice(0, 40).map((fire) => ({
+        x: clampNumber(fire?.x, 0, 1, .5),
+        y: clampNumber(fire?.y, 0, 1, .5),
+        hp: clampNumber(fire?.hp, 0, 100, 100),
+        radius: clampNumber(fire?.radius, .005, .12, .03),
+      }))
+    : [];
+
+  const burned = Array.isArray(rawSnapshot.burned)
+    ? rawSnapshot.burned.slice(0, 80).map((patch) => ({
+        x: clampNumber(patch?.x, 0, 1, .5),
+        y: clampNumber(patch?.y, 0, 1, .5),
+        age: clampNumber(patch?.age, 0, 16, 0),
+        radius: clampNumber(patch?.radius, .005, .15, .03),
+      }))
+    : [];
+
+  const helicopters = Array.isArray(rawSnapshot.helicopters)
+    ? rawSnapshot.helicopters
+        .slice(0, 6)
+        .filter((heli) => activeIds.has(String(heli?.id ?? "")))
+        .map((heli) => ({
+          id: String(heli.id),
+          x: clampNumber(heli.x, 0, 1, .31),
+          y: clampNumber(heli.y, 0, 1, .24),
+          vx: clampNumber(heli.vx, -1, 1, 0),
+          vy: clampNumber(heli.vy, -1, 1, 0),
+          water: clampNumber(heli.water, 0, 1000, 100),
+          capacity: clampNumber(heli.capacity, 1, 1000, 100),
+          refillProgress: clampNumber(heli.refillProgress, 0, 100, 0),
+        }))
+    : [];
+
+  return {
+    version: 1,
+    round: room.round,
+    timeLeft: clampNumber(rawSnapshot.timeLeft, 0, 600, 0),
+    complete: Boolean(rawSnapshot.complete),
+    extinguished: Math.floor(clampNumber(rawSnapshot.extinguished, 0, 10000, 0)),
+    spreadElapsedMs: clampNumber(rawSnapshot.spreadElapsedMs, 0, 60000, 0),
+    fires,
+    burned,
+    helicopters,
+  };
 }
 
 export class GameRoom extends DurableObject {
@@ -77,6 +135,8 @@ export class GameRoom extends DurableObject {
         hostId,
         difficulty: "normal",
         round: 1,
+        upgrades: { tank: 0, speed: 0, power: 0 },
+        selectedUpgrade: null,
         players: [{
           id: hostId,
           name: cleanName(payload.hostName),
@@ -118,6 +178,9 @@ export class GameRoom extends DurableObject {
         player.name = playerName;
         player.connected = true;
       }
+
+      room.upgrades ??= { tank: 0, speed: 0, power: 0 };
+      room.selectedUpgrade ??= null;
       ensureConnectedHost(room);
 
       const pair = new WebSocketPair();
@@ -158,6 +221,20 @@ export class GameRoom extends DurableObject {
       return;
     }
 
+    if (message.type === "matchSnapshot") {
+      if (room.phase !== "playing" || room.hostId !== playerId) return;
+      const snapshot = sanitizeSnapshot(message.snapshot, room);
+      if (!snapshot) return;
+
+      this.broadcast({ type: "matchSnapshot", snapshot });
+
+      if (snapshot.complete) {
+        room.phase = "roundEnd";
+        await this.broadcastRoom(room);
+      }
+      return;
+    }
+
     if (message.type === "setColor") {
       const colorId = String(message.colorId ?? "");
       if (!COLOR_IDS.has(colorId)) return;
@@ -189,15 +266,29 @@ export class GameRoom extends DurableObject {
       }
       room.players = active;
       ensureConnectedHost(room);
+      room.upgrades ??= { tank: 0, speed: 0, power: 0 };
+      room.selectedUpgrade = null;
       room.phase = "playing";
       await this.broadcastRoom(room);
       return;
     }
 
+    if (message.type === "chooseUpgrade") {
+      if (!player.isHost || room.phase !== "roundEnd" || room.selectedUpgrade) return;
+      const upgradeId = String(message.upgradeId ?? "");
+      if (!UPGRADE_IDS.has(upgradeId)) return;
+      room.upgrades ??= { tank: 0, speed: 0, power: 0 };
+      room.upgrades[upgradeId] = Math.max(0, Number(room.upgrades[upgradeId]) || 0) + 1;
+      room.selectedUpgrade = upgradeId;
+      await this.broadcastRoom(room);
+      return;
+    }
+
     if (message.type === "returnLobby") {
-      if (!player.isHost) return;
+      if (!player.isHost || room.phase !== "roundEnd" || !room.selectedUpgrade) return;
       room.phase = "lobby";
       room.round += 1;
+      room.selectedUpgrade = null;
       await this.broadcastRoom(room);
       return;
     }
