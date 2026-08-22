@@ -14,10 +14,7 @@ export const DIFFICULTIES = {
 };
 
 export const UPGRADES = [
-  { id: 'tank', label: 'Bigger Water Tank', description: '+20% tank capacity' },
-  { id: 'refill', label: 'Faster Refill', description: '-15% refill time' },
-  { id: 'speed', label: 'Faster Copters', description: '+8% flight speed' },
-  { id: 'drop', label: 'Wider Water Drop', description: '+12% drop radius' },
-  { id: 'power', label: 'Stronger Water', description: '+15% extinguish power' },
-  { id: 'recovery', label: 'Faster Recovery', description: 'Burned ground greens up sooner' },
+  { id: 'tank', label: 'More Water', description: '+20% water capacity' },
+  { id: 'speed', label: 'Faster Copter', description: '+8% flight speed' },
+  { id: 'power', label: 'Stronger Water', description: '+15% fire suppression' },
 ];
