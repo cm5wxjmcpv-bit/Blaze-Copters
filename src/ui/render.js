@@ -86,9 +86,10 @@ export function drawSimulation(ctx, sim) {
     ctx.restore();
 
     const pct = Math.max(0, Math.min(1, heli.water / heli.capacity));
+    const waterColor = pct >= .8 ? '#35c759' : pct >= .4 ? '#ffd43b' : '#ff453a';
     ctx.fillStyle = 'rgba(0,0,0,.5)';
     ctx.fillRect(heli.x - 20, heli.y + 20, 40, 5);
-    ctx.fillStyle = '#5ec9ff';
+    ctx.fillStyle = waterColor;
     ctx.fillRect(heli.x - 20, heli.y + 20, 40 * pct, 5);
 
     if (heli.refillProgress > 0) {
