@@ -91,7 +91,7 @@ function spreadFromFire(sim, source, biasAngle = null, options = {}) {
   return sim.spawnFire(
     source.x + Math.cos(angle) * range,
     source.y + Math.sin(angle) * range,
-    options,
+    { ...options, spreading: true },
   );
 }
 
@@ -151,6 +151,55 @@ function pointOnRoute(points, progress) {
   }
 
   return { ...points.at(-1) };
+}
+
+function nearestPointOnRoute(points, point) {
+  if (!points.length) return null;
+  if (points.length === 1) return { ...points[0] };
+
+  let nearest = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+
+  for (let index = 1; index < points.length; index += 1) {
+    const start = points[index - 1];
+    const end = points[index];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const lengthSquared = dx * dx + dy * dy;
+    const progress = lengthSquared
+      ? clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared, 0, 1)
+      : 0;
+    const candidate = { x: start.x + dx * progress, y: start.y + dy * progress };
+    const candidateDistance = distance(point, candidate);
+
+    if (candidateDistance < nearestDistance) {
+      nearest = candidate;
+      nearestDistance = candidateDistance;
+    }
+  }
+
+  return nearest;
+}
+
+function roadsidePosition(sim, point) {
+  const side = Math.random() < .5 ? -1 : 1;
+  const clearance = sim.objectiveIgnitionClearance() + 18;
+  const extra = Math.random() * Math.max(24, Math.min(92, sim.height * .14));
+  return {
+    x: point.x + (Math.random() - .5) * Math.min(96, sim.width * .11),
+    y: point.y + side * (clearance + extra),
+  };
+}
+
+function spawnRoadsideFire(sim, point, options = {}) {
+  if (!point) return false;
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const position = roadsidePosition(sim, point);
+    if (sim.spawnFire(position.x, position.y, options)) return true;
+  }
+
+  return false;
 }
 
 function initializeBuildings(sim) {
@@ -284,10 +333,9 @@ function activateConvoyChunks(sim) {
     const count = Math.min(4, 1 + Math.floor(tier / 4) + extra);
 
     for (let index = 0; index < count; index += 1) {
-      const roadOffset = (Math.random() - .5) * (.24 - Math.min(.1, tier * .012));
       const x = clamp(chunk.x + chunk.width * (.22 + Math.random() * .62), sim.width * .52, sim.width * .94);
-      const y = (sim.route[0]?.y ?? sim.height * .52) + roadOffset * sim.height;
-      sim.spawnFire(x, y, {
+      const point = { x, y: sim.route[0]?.y ?? sim.height * .52 };
+      spawnRoadsideFire(sim, point, {
         hp: Math.min(sim.maximumFireHealth, 92 + Math.min(42, tier * 4)),
         kind: 'route',
       });
@@ -477,7 +525,12 @@ const spotController = {
 const evacuationController = {
   initialize(sim, authoritative) {
     if (!authoritative) return;
-    spawnStarterFires(sim, .62, .51, .47, .35, Math.max(2, sim.scaling.initialFires - 1));
+
+    const count = Math.max(2, sim.scaling.initialFires - 1);
+    for (let index = 0; index < count; index += 1) {
+      const point = pointOnRoute(sim.route, .24 + Math.random() * .60);
+      spawnRoadsideFire(sim, point, { kind: 'wildfire' });
+    }
   },
   update(sim, dt) {
     const state = sim.state;
@@ -493,13 +546,27 @@ const evacuationController = {
     updateEvacuationUnits(sim, dt);
   },
   spread(sim) {
-    if (!sim.route.length || Math.random() < .4) {
-      spreadRandomFire(sim, { hp: 100 });
+    if (!sim.route.length) {
+      spreadRandomFire(sim, { hp: 100, kind: 'route' });
       return;
     }
 
-    const point = pointOnRoute(sim.route, .22 + Math.random() * .62);
-    sim.spawnFire(point.x + (Math.random() - .5) * 100, point.y + (Math.random() - .5) * 105, { kind: 'route' });
+    if (!sim.fires.length) {
+      const point = pointOnRoute(sim.route, .22 + Math.random() * .62);
+      spawnRoadsideFire(sim, point, { hp: 100, kind: 'route' });
+      return;
+    }
+
+    const source = sim.fires[Math.floor(Math.random() * sim.fires.length)];
+    const road = nearestPointOnRoute(sim.route, source);
+    const nearestUnit = sim.state.units
+      .filter((unit) => unit.hp > 0)
+      .sort((left, right) => distance(left, source) - distance(right, source))[0];
+    const target = nearestUnit && distance(source, road) < source.radius + 24
+      ? nearestUnit
+      : road;
+    const direction = Math.atan2(target.y - source.y, target.x - source.x);
+    spreadFromFire(sim, source, direction, { hp: 100, kind: 'route' });
   },
   spreadInterval(sim) {
     return Math.max(1800, sim.scaling.spreadMs * 1.12);
@@ -519,7 +586,12 @@ const convoyController = {
     if (state.difficultyTier >= 3) {
       state.warningCooldown -= dt;
       if (state.warningCooldown <= 0) {
-        warningAt(sim, sim.width * (.66 + Math.random() * .26), sim.height * (.42 + Math.random() * .19), 2.1, 'spot');
+        const roadPoint = {
+          x: sim.width * (.66 + Math.random() * .26),
+          y: sim.route[0]?.y ?? sim.height * .52,
+        };
+        const warning = roadsidePosition(sim, roadPoint);
+        warningAt(sim, warning.x, warning.y, 2.1, 'spot');
         state.warningCooldown = Math.max(8, 20 - state.difficultyTier);
       }
     }
@@ -527,7 +599,15 @@ const convoyController = {
   spread(sim) {
     if (!sim.fires.length) return;
     const source = sim.fires[Math.floor(Math.random() * sim.fires.length)];
-    spreadFromFire(sim, source, Math.PI + (Math.random() - .5) * .8, {
+    const lead = sim.state.convoyVehicles[0];
+    if (!lead) return;
+
+    const target = {
+      x: Math.max(lead.x + 38, source.x - Math.max(78, sim.width * .12)),
+      y: lead.y,
+    };
+    const direction = Math.atan2(target.y - source.y, target.x - source.x);
+    spreadFromFire(sim, source, direction, {
       hp: Math.min(sim.maximumFireHealth, 90 + sim.state.difficultyTier * 4),
       kind: 'route',
     });
