@@ -16,6 +16,8 @@ const session = {
   view: 'home',
   intentionalLeave: false,
   input: { x: 0, y: 0 },
+  upgrades: { tank: 0, speed: 0, power: 0 },
+  resizeHandler: null,
 };
 
 const escapeHtml = (value) => String(value ?? '')
@@ -26,6 +28,21 @@ const escapeHtml = (value) => String(value ?? '')
   .replaceAll("'", '&#039;');
 
 const requestedRoomCode = () => (new URLSearchParams(location.search).get('room') || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+
+function cleanupGameView() {
+  if (session.resizeHandler) {
+    window.removeEventListener('resize', session.resizeHandler);
+    session.resizeHandler = null;
+  }
+  window.onkeydown = null;
+  window.onkeyup = null;
+  session.input.x = 0;
+  session.input.y = 0;
+}
+
+function resetMissionProgress() {
+  session.upgrades = { tank: 0, speed: 0, power: 0 };
+}
 
 function setRoomQuery(code) {
   const url = new URL(location.href);
@@ -61,7 +78,9 @@ function applyRoomState(room) {
   if (!room) return;
 
   if (room.phase === 'playing') {
+    const activePlayers = room.players.filter((player) => player.connected !== false);
     if (session.view !== 'game') gameScreen();
+    else session.sim?.syncPlayers(activePlayers);
     return;
   }
 
@@ -114,9 +133,7 @@ function connectToRoom(code, name) {
         return;
       }
 
-      if (message.type === 'error') {
-        window.alert(message.message || 'Room error');
-      }
+      if (message.type === 'error') window.alert(message.message || 'Room error');
     });
 
     ws.addEventListener('error', () => {
@@ -135,6 +152,7 @@ function connectToRoom(code, name) {
         reject(new Error('Could not connect to that room.'));
       }
       if (!session.intentionalLeave && session.view !== 'home') {
+        cleanupGameView();
         session.room = null;
         session.sim = null;
         setRoomQuery('');
@@ -145,8 +163,10 @@ function connectToRoom(code, name) {
 }
 
 function homeScreen(message = '') {
+  cleanupGameView();
   session.view = 'home';
   session.sim = null;
+  resetMissionProgress();
   const prefillCode = requestedRoomCode();
 
   app.innerHTML = `
@@ -181,6 +201,7 @@ function homeScreen(message = '') {
 
   createButton.addEventListener('click', async () => {
     const name = nameInput.value.trim() || 'Player 1';
+    resetMissionProgress();
     createButton.disabled = true;
     joinButton.disabled = true;
     status.textContent = 'Creating online room…';
@@ -198,6 +219,7 @@ function homeScreen(message = '') {
   joinButton.addEventListener('click', async () => {
     const name = nameInput.value.trim() || 'Player 1';
     const code = codeInput.value.toUpperCase();
+    resetMissionProgress();
     joinButton.disabled = true;
     createButton.disabled = true;
     status.textContent = `Looking for room ${code}…`;
@@ -214,6 +236,7 @@ function homeScreen(message = '') {
 }
 
 function lobbyScreen() {
+  cleanupGameView();
   session.view = 'lobby';
   const room = session.room;
   if (!room) return homeScreen();
@@ -258,24 +281,14 @@ function lobbyScreen() {
         </div>
 
         ${me.isHost ? `<button id="start-game" ${canStart ? '' : 'disabled'}>Start Mission</button>` : `<div class="notice">Waiting for host to start…</div>`}
-        <div class="notice small">Room joining, player list, colors, difficulty, and mission start now sync through Cloudflare. Full authoritative fire/game-state synchronization is the next multiplayer step.</div>
+        <div class="notice small">Core gameplay is being tuned locally first. Shared fire/game-state synchronization will be connected after the local game loop is solid.</div>
         <button class="secondary" id="leave-game">Leave</button>
       </div>
     </section>`;
 
-  document.querySelectorAll('[data-color]').forEach((button) => {
-    button.addEventListener('click', () => {
-      sendRoomMessage('setColor', { colorId: button.dataset.color });
-    });
-  });
-
-  document.querySelector('#difficulty')?.addEventListener('change', (event) => {
-    sendRoomMessage('setDifficulty', { difficulty: event.target.value });
-  });
-
-  document.querySelector('#start-game')?.addEventListener('click', () => {
-    sendRoomMessage('start');
-  });
+  document.querySelectorAll('[data-color]').forEach((button) => button.addEventListener('click', () => sendRoomMessage('setColor', { colorId: button.dataset.color })));
+  document.querySelector('#difficulty')?.addEventListener('change', (event) => sendRoomMessage('setDifficulty', { difficulty: event.target.value }));
+  document.querySelector('#start-game')?.addEventListener('click', () => sendRoomMessage('start'));
 
   document.querySelector('#leave-game').addEventListener('click', () => {
     session.intentionalLeave = true;
@@ -288,7 +301,30 @@ function lobbyScreen() {
   });
 }
 
+function paintWaterHud(hud, percent) {
+  const safePercent = Math.max(0, Math.min(100, Math.round(percent)));
+  hud.textContent = `Water ${safePercent}%`;
+  const level = safePercent >= 80 ? 'high' : safePercent >= 40 ? 'mid' : 'low';
+  if (hud.dataset.level === level) return;
+  hud.dataset.level = level;
+
+  if (level === 'high') {
+    hud.style.background = 'rgba(38, 150, 67, .94)';
+    hud.style.color = '#fff';
+    hud.style.borderColor = 'rgba(108, 255, 137, .55)';
+  } else if (level === 'mid') {
+    hud.style.background = 'rgba(242, 183, 5, .96)';
+    hud.style.color = '#182016';
+    hud.style.borderColor = 'rgba(255, 235, 128, .7)';
+  } else {
+    hud.style.background = 'rgba(187, 40, 34, .94)';
+    hud.style.color = '#fff';
+    hud.style.borderColor = 'rgba(255, 126, 119, .62)';
+  }
+}
+
 function gameScreen() {
+  cleanupGameView();
   session.view = 'game';
   const room = session.room;
   const activePlayers = room.players.filter((player) => player.connected !== false);
@@ -313,6 +349,7 @@ function gameScreen() {
   const ctx = canvas.getContext('2d');
 
   const resize = () => {
+    if (!canvas.isConnected) return;
     const rect = canvas.getBoundingClientRect();
     const dpr = Math.min(2, devicePixelRatio || 1);
     canvas.width = Math.round(rect.width * dpr);
@@ -323,7 +360,8 @@ function gameScreen() {
   resize();
 
   const rect = canvas.getBoundingClientRect();
-  session.sim = new BlazeSimulation({ width: rect.width, height: rect.height, players: activePlayers, difficulty: room.difficulty, round: room.round });
+  session.sim = new BlazeSimulation({ width: rect.width, height: rect.height, players: activePlayers, difficulty: room.difficulty, round: room.round, upgrades: session.upgrades });
+  session.resizeHandler = resize;
   window.addEventListener('resize', resize, { passive: true });
 
   const setInput = (x, y) => {
@@ -349,21 +387,24 @@ function gameScreen() {
     session.sim.tick(now);
     drawSimulation(ctx, session.sim);
     const mine = session.sim.helicopters.find((helicopter) => helicopter.id === session.playerId);
-    document.querySelector('#fire-hud').textContent = `Fires ${session.sim.fires.length}`;
-    if (mine) document.querySelector('#water-hud').textContent = `Water ${Math.round((mine.water / mine.capacity) * 100)}%`;
-    const seconds = Math.ceil(session.sim.timeLeft);
-    document.querySelector('#time-hud').textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+    const fireHud = document.querySelector('#fire-hud');
+    const waterHud = document.querySelector('#water-hud');
+    const timeHud = document.querySelector('#time-hud');
+    if (!fireHud || !waterHud || !timeHud) return;
 
-    if (session.sim.complete) {
-      endRoundScreen();
-      return;
-    }
+    fireHud.textContent = `Fires ${session.sim.fires.length}`;
+    if (mine) paintWaterHud(waterHud, (mine.water / mine.capacity) * 100);
+    const seconds = Math.ceil(session.sim.timeLeft);
+    timeHud.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+
+    if (session.sim.complete) return endRoundScreen();
     requestAnimationFrame(loop);
   };
   requestAnimationFrame(loop);
 }
 
 function endRoundScreen() {
+  cleanupGameView();
   session.view = 'round-end';
   const sim = session.sim;
   const choices = sim.upgradeChoices();
@@ -377,24 +418,30 @@ function endRoundScreen() {
           <div class="notice grow"><strong>${sim.extinguished}</strong><br><span class="small">fires extinguished</span></div>
           <div class="notice grow"><strong>${sim.fires.length}</strong><br><span class="small">fires still burning</span></div>
         </div>
-        <h3 style="margin-bottom:0">Team Upgrade Vote</h3>
-        <p class="small">Upgrade voting is still local in this prototype. Shared server-side voting will be connected with the authoritative game state.</p>
+        <h3 style="margin-bottom:0">Choose One Upgrade</h3>
         <div class="row">
-          ${choices.map((choice) => `<button class="grow upgrade-choice" data-upgrade="${choice.id}">${escapeHtml(choice.label)}<br><span style="font-weight:500">${escapeHtml(choice.description)}</span></button>`).join('')}
+          ${choices.map((choice) => `<button class="grow upgrade-choice" data-upgrade="${choice.id}">${escapeHtml(choice.label)}<br><span style="font-weight:500">${escapeHtml(choice.description)}</span><br><span class="small">Level ${session.upgrades[choice.id] || 0} → ${(session.upgrades[choice.id] || 0) + 1}</span></button>`).join('')}
         </div>
-        ${me?.isHost ? '<button class="secondary" id="lobby-button">Return Everyone to Lobby</button>' : '<button class="secondary" id="leave-round">Leave Room</button>'}
+        ${me?.isHost ? '<button class="secondary" id="lobby-button" disabled>Continue</button>' : '<button class="secondary" id="leave-round">Leave Room</button>'}
       </div>
     </section>`;
 
+  let selected = false;
   document.querySelectorAll('.upgrade-choice').forEach((button) => {
     button.addEventListener('click', () => {
-      sim.applyUpgrade(button.dataset.upgrade);
-    }, { once: true });
+      if (selected) return;
+      const id = button.dataset.upgrade;
+      if (!(id in session.upgrades)) return;
+      selected = true;
+      session.upgrades[id] += 1;
+      document.querySelectorAll('.upgrade-choice').forEach((choiceButton) => { choiceButton.disabled = true; });
+      button.textContent = 'Selected';
+      const lobbyButton = document.querySelector('#lobby-button');
+      if (lobbyButton) lobbyButton.disabled = false;
+    });
   });
 
-  document.querySelector('#lobby-button')?.addEventListener('click', () => {
-    sendRoomMessage('returnLobby');
-  });
+  document.querySelector('#lobby-button')?.addEventListener('click', () => sendRoomMessage('returnLobby'));
 
   document.querySelector('#leave-round')?.addEventListener('click', () => {
     session.intentionalLeave = true;
