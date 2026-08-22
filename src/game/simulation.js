@@ -1,5 +1,18 @@
 import { DIFFICULTIES, HELICOPTER_COLORS, UPGRADES } from './config.js';
-import { DEFAULT_LEVEL_ID, DEFAULT_MODE_ID, isValidLevel, isValidMode } from './modes.js';
+import { controllerForMode, createModeState } from './mode-controllers.js';
+import {
+  DEFAULT_LEVEL_ID,
+  DEFAULT_MODE_ID,
+  GAME_LEVELS,
+  GAME_MODES,
+  SNAPSHOT_VERSION,
+  defaultLevelForMode,
+  fireLimitForMode,
+  isValidLevel,
+  isValidMode,
+  maximumFireHealth,
+  roundDurationForMode,
+} from './modes.js';
 import { scaleForPlayers } from './scaling.js';
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -22,14 +35,21 @@ export class BlazeSimulation {
     this.height = height;
     this.players = players;
     this.difficulty = DIFFICULTIES[difficulty] || DIFFICULTIES.normal;
-    this.scaling = scaleForPlayers(players.length, this.difficulty);
     this.round = round;
     this.mode = isValidMode(mode) ? mode : DEFAULT_MODE_ID;
-    this.level = isValidLevel(this.mode, level) ? level : DEFAULT_LEVEL_ID;
+    this.level = isValidLevel(this.mode, level) ? level : defaultLevelForMode(this.mode);
+    this.modeConfig = GAME_MODES[this.mode];
+    this.levelConfig = GAME_LEVELS[this.level] || GAME_LEVELS[DEFAULT_LEVEL_ID];
+    this.modeController = controllerForMode(this.mode);
+    this.maximumFireHealth = maximumFireHealth(this.mode);
+    this.scaling = scaleForPlayers(players.length, this.difficulty);
+    this.scaling.maxFires = fireLimitForMode(this.mode, this.scaling.maxFires);
+    this.teamPressure = 1 + Math.max(0, Math.min(5, players.length - 1)) * .18;
+    this.durationSeconds = roundDurationForMode(this.mode, this.level, this.difficulty.roundSeconds);
     this.roundEndsAt = Number.isFinite(Number(roundEndsAt)) && Number(roundEndsAt) > 0
       ? Number(roundEndsAt)
       : null;
-    this.timeLeft = this.difficulty.roundSeconds;
+    this.timeLeft = this.durationSeconds ?? 0;
     this.lastTick = performance.now();
     this.lastSpread = this.lastTick;
     this.complete = false;
@@ -41,42 +61,37 @@ export class BlazeSimulation {
       power: Math.max(0, Number(upgrades.power) || 0),
     };
 
-    // Starting map: one compact, readable single-screen training area.
-    // Larger scrolling maps will be added later as co-op levels.
+    const map = this.levelConfig.map;
+    const minDimension = Math.min(width, height);
     this.water = {
-      x: width * .14,
-      y: height * .68,
-      radius: Math.max(56, Math.min(width, height) * .09),
+      x: width * map.water.x,
+      y: height * map.water.y,
+      radius: Math.max(56, minDimension * map.water.radius),
     };
-    this.fireStation = { x: width * .22, y: height * .24 };
+    this.fireStation = { x: width * map.station.x, y: height * map.station.y };
     this.helipad = {
-      x: width * .31,
-      y: height * .24,
-      radius: Math.max(24, Math.min(width, height) * .04),
+      x: width * map.helipad.x,
+      y: height * map.helipad.y,
+      radius: Math.max(24, minDimension * map.helipad.radius),
     };
-    this.cabins = [
+    this.cabins = this.mode === 'protect-town' ? [] : [
       { x: width * .72, y: height * .20 },
       { x: width * .83, y: height * .24 },
       { x: width * .75, y: height * .34 },
       { x: width * .87, y: height * .37 },
     ];
-    this.campground = [
+    this.campground = this.mode === 'convoy-protection' ? [] : [
       { x: width * .69, y: height * .72 },
       { x: width * .79, y: height * .77 },
       { x: width * .86, y: height * .68 },
     ];
+    this.route = map.road.map((point) => ({ x: point.x * width, y: point.y * height }));
     this.trees = this.buildTrees();
     this.fires = [];
     this.burned = [];
     this.helicopters = players.map((player, i) => this.createHelicopter(player, i));
-
-    if (spawnInitialFires) {
-      let attempts = 0;
-      while (this.fires.length < this.scaling.initialFires && attempts < this.scaling.initialFires * 12) {
-        this.spawnFire();
-        attempts += 1;
-      }
-    }
+    this.state = createModeState(this.mode, players.length);
+    this.modeController.initialize(this, spawnInitialFires);
   }
 
   buildTrees() {
@@ -140,6 +155,8 @@ export class BlazeSimulation {
 
     this.players = players;
     this.scaling = scaleForPlayers(players.length, this.difficulty);
+    this.scaling.maxFires = fireLimitForMode(this.mode, this.scaling.maxFires);
+    this.teamPressure = 1 + Math.max(0, Math.min(5, players.length - 1)) * .18;
   }
 
   resize(width, height) {
@@ -150,8 +167,26 @@ export class BlazeSimulation {
     const oldMinDimension = Math.max(1, Math.min(this.width, this.height));
     const radialScale = Math.min(width, height) / oldMinDimension;
 
-    for (const list of [this.helicopters, this.fires, this.burned, this.trees, this.cabins, this.campground]) {
+    const positioned = [
+      this.helicopters,
+      this.fires,
+      this.burned,
+      this.trees,
+      this.cabins,
+      this.campground,
+      this.route,
+      this.state.buildings,
+      this.state.warnings,
+      this.state.units,
+      this.state.convoyVehicles,
+    ];
+    for (const list of positioned) {
       for (const item of list) { item.x *= sx; item.y *= sy; }
+    }
+
+    for (const chunk of this.state.chunks) {
+      chunk.x *= sx;
+      chunk.width *= sx;
     }
 
     for (const list of [this.fires, this.burned]) {
@@ -177,7 +212,7 @@ export class BlazeSimulation {
     heli.vy = y * scale;
   }
 
-  spawnFire(x, y) {
+  spawnFire(x, y, { hp = 100, kind = 'wildfire' } = {}) {
     if (this.fires.length >= this.scaling.maxFires) return false;
 
     const margin = Math.min(80, Math.max(24, Math.min(this.width, this.height) * .16));
@@ -199,7 +234,14 @@ export class BlazeSimulation {
       if (distance({ x: fx, y: fy }, this.water) < this.water.radius * 1.5) continue;
       if (!suppliedPosition && distance({ x: fx, y: fy }, this.helipad) < this.helipad.radius * 2.2) continue;
 
-      this.fires.push({ x: fx, y: fy, hp: 100, radius: 22 + Math.random() * 8, born: performance.now() });
+      this.fires.push({
+        x: fx,
+        y: fy,
+        hp: clamp(Number(hp) || 100, 10, this.maximumFireHealth),
+        radius: 22 + Math.random() * 8,
+        kind,
+        born: performance.now(),
+      });
       return true;
     }
 
@@ -216,13 +258,23 @@ export class BlazeSimulation {
     return [...UPGRADES];
   }
 
+  finish(outcome, reason) {
+    if (this.complete) return false;
+    this.complete = true;
+    this.state.outcome = outcome === 'won' ? 'won' : 'lost';
+    this.state.reason = String(reason || 'Mission complete.');
+    return true;
+  }
+
   createSnapshot(now = performance.now()) {
     const minDimension = Math.max(1, Math.min(this.width, this.height));
     const normalizeX = (value) => clamp(value / Math.max(1, this.width), 0, 1);
     const normalizeY = (value) => clamp(value / Math.max(1, this.height), 0, 1);
+    const normalizeActor = (item) => ({ ...item, x: normalizeX(item.x), y: normalizeY(item.y) });
+    const state = this.state;
 
     return {
-      version: 2,
+      version: SNAPSHOT_VERSION,
       round: this.round,
       mode: this.mode,
       level: this.level,
@@ -239,6 +291,7 @@ export class BlazeSimulation {
         y: normalizeY(fire.y),
         hp: fire.hp,
         radius: fire.radius / minDimension,
+        kind: fire.kind || 'wildfire',
       })),
       burned: this.burned.map((patch) => ({
         x: normalizeX(patch.x),
@@ -256,6 +309,39 @@ export class BlazeSimulation {
         capacity: heli.capacity,
         refillProgress: heli.refillProgress,
       })),
+      modeState: {
+        elapsed: state.elapsed,
+        danger: state.danger,
+        dangerSeconds: state.dangerSeconds,
+        difficultyTier: state.difficultyTier,
+        highestDifficulty: state.highestDifficulty,
+        teamWaterDropped: state.teamWaterDropped,
+        outcome: state.outcome,
+        reason: state.reason,
+        objectivePhase: state.objectivePhase,
+        objectiveSeconds: state.objectiveSeconds,
+        warningCooldown: state.warningCooldown,
+        warnings: state.warnings.map(normalizeActor),
+        buildings: state.buildings.map(normalizeActor),
+        buildingsLost: state.buildingsLost,
+        units: state.units.map(normalizeActor),
+        evacuated: state.evacuated,
+        unitsLost: state.unitsLost,
+        unitsRequired: state.unitsRequired,
+        vehicleCooldown: state.vehicleCooldown,
+        routeBlocked: state.routeBlocked,
+        blockedSeconds: state.blockedSeconds,
+        distanceMeters: state.distanceMeters,
+        convoyIntegrity: state.convoyIntegrity,
+        convoyVehicles: state.convoyVehicles.map(normalizeActor),
+        chunks: state.chunks.map((chunk) => ({
+          ...chunk,
+          x: chunk.x / Math.max(1, this.width),
+          width: chunk.width / Math.max(1, this.width),
+        })),
+        nextChunkIndex: state.nextChunkIndex,
+        nextEventId: state.nextEventId,
+      },
     };
   }
 
@@ -268,7 +354,7 @@ export class BlazeSimulation {
     const denormalizeY = (value) => clamp(Number(value) || 0, 0, 1) * this.height;
     const playersById = new Map(this.players.map((player) => [player.id, player]));
 
-    this.timeLeft = clamp(Number(snapshot.timeLeft) || 0, 0, this.difficulty.roundSeconds);
+    this.timeLeft = clamp(Number(snapshot.timeLeft) || 0, 0, this.durationSeconds ?? 43200);
     this.complete = Boolean(snapshot.complete);
     this.extinguished = Math.max(0, Math.floor(Number(snapshot.extinguished) || 0));
     this.lastSpread = now - clamp(Number(snapshot.spreadElapsedMs) || 0, 0, 60000);
@@ -283,8 +369,9 @@ export class BlazeSimulation {
       ? snapshot.fires.map((fire) => ({
           x: denormalizeX(fire.x),
           y: denormalizeY(fire.y),
-          hp: clamp(Number(fire.hp) || 0, 0, 100),
+          hp: clamp(Number(fire.hp) || 0, 0, this.maximumFireHealth),
           radius: clamp(Number(fire.radius) || .03, .005, .12) * minDimension,
+          kind: String(fire.kind || 'wildfire'),
           born: now,
         }))
       : [];
@@ -332,6 +419,66 @@ export class BlazeSimulation {
       });
     }
 
+    if (snapshot.modeState && typeof snapshot.modeState === 'object') {
+      const incoming = snapshot.modeState;
+      const base = createModeState(this.mode, this.players.length);
+      const restoreActor = (item) => ({
+        ...item,
+        x: denormalizeX(item.x),
+        y: denormalizeY(item.y),
+      });
+
+      this.state = {
+        ...base,
+        elapsed: clamp(Number(incoming.elapsed) || 0, 0, 43200),
+        danger: clamp(Number(incoming.danger) || 0, 0, 100),
+        dangerSeconds: clamp(Number(incoming.dangerSeconds) || 0, 0, 600),
+        difficultyTier: Math.max(1, Math.floor(Number(incoming.difficultyTier) || 1)),
+        highestDifficulty: Math.max(1, Math.floor(Number(incoming.highestDifficulty) || 1)),
+        teamWaterDropped: Math.max(0, Number(incoming.teamWaterDropped) || 0),
+        outcome: ['active', 'won', 'lost'].includes(incoming.outcome) ? incoming.outcome : 'active',
+        reason: String(incoming.reason || '').slice(0, 160),
+        objectivePhase: incoming.objectivePhase === 'containment' ? 'containment' : 'active',
+        objectiveSeconds: clamp(Number(incoming.objectiveSeconds) || 0, 0, 1200),
+        warningCooldown: clamp(Number(incoming.warningCooldown) || 0, 0, 300),
+        warnings: Array.isArray(incoming.warnings)
+          ? incoming.warnings.slice(0, 16).map(restoreActor)
+          : [],
+        buildings: Array.isArray(incoming.buildings)
+          ? incoming.buildings.slice(0, 16).map(restoreActor)
+          : base.buildings,
+        buildingsLost: Math.max(0, Math.floor(Number(incoming.buildingsLost) || 0)),
+        units: Array.isArray(incoming.units)
+          ? incoming.units.slice(0, 20).map(restoreActor)
+          : [],
+        evacuated: Math.max(0, Math.floor(Number(incoming.evacuated) || 0)),
+        unitsLost: Math.max(0, Math.floor(Number(incoming.unitsLost) || 0)),
+        unitsRequired: Math.max(0, Math.floor(Number(incoming.unitsRequired) || 0)),
+        vehicleCooldown: clamp(Number(incoming.vehicleCooldown) || 0, 0, 120),
+        routeBlocked: Boolean(incoming.routeBlocked),
+        blockedSeconds: clamp(Number(incoming.blockedSeconds) || 0, 0, 1200),
+        distanceMeters: Math.max(0, Number(incoming.distanceMeters) || 0),
+        convoyIntegrity: clamp(Number(incoming.convoyIntegrity) || 0, 0, 100),
+        convoyVehicles: Array.isArray(incoming.convoyVehicles)
+          ? incoming.convoyVehicles.slice(0, 8).map(restoreActor)
+          : [],
+        chunks: Array.isArray(incoming.chunks)
+          ? incoming.chunks.slice(0, 8).map((chunk) => ({
+              ...chunk,
+              index: Math.floor(Number(chunk.index) || 0),
+              x: clamp(Number(chunk.x) || 0, -3, 4) * this.width,
+              width: clamp(Number(chunk.width) || .64, .15, 1.5) * this.width,
+              variant: Math.max(0, Math.floor(Number(chunk.variant) || 0)),
+              activated: Boolean(chunk.activated),
+            }))
+          : [],
+        nextChunkIndex: Math.max(0, Math.floor(Number(incoming.nextChunkIndex) || 0)),
+        nextEventId: Math.max(1, Math.floor(Number(incoming.nextEventId) || 1)),
+      };
+    } else if (this.complete && this.state.outcome === 'active') {
+      this.state.outcome = this.mode === 'classic' ? 'won' : 'lost';
+    }
+
     return true;
   }
 
@@ -340,11 +487,21 @@ export class BlazeSimulation {
     const elapsed = Math.max(0, (now - this.lastTick) / 1000);
     const dt = Math.min(.05, elapsed);
     this.lastTick = now;
-    this.timeLeft = Math.max(0, this.timeLeft - elapsed);
-    if (this.roundEndsAt) {
-      this.timeLeft = Math.min(this.timeLeft, Math.max(0, (this.roundEndsAt - Date.now()) / 1000));
+    this.state.elapsed += elapsed;
+
+    if (this.durationSeconds !== null) {
+      this.timeLeft = Math.max(0, this.timeLeft - elapsed);
+      if (this.roundEndsAt) {
+        this.timeLeft = Math.min(this.timeLeft, Math.max(0, (this.roundEndsAt - Date.now()) / 1000));
+      }
+      if (this.timeLeft <= 0) {
+        this.finish(
+          this.mode === 'classic' ? 'won' : 'lost',
+          this.mode === 'classic' ? 'The team completed the training round.' : 'The mission ran out of time.',
+        );
+        return;
+      }
     }
-    if (this.timeLeft <= 0) this.complete = true;
 
     const speed = 155 * (1 + this.upgrades.speed * .08);
     const dropRadius = 30;
@@ -376,7 +533,11 @@ export class BlazeSimulation {
               activelyDropping = true;
             }
           }
-          if (activelyDropping) heli.water = Math.max(0, heli.water - 19 * dt);
+          if (activelyDropping) {
+            const spent = Math.min(heli.water, 19 * dt);
+            heli.water = Math.max(0, heli.water - spent);
+            this.state.teamWaterDropped += spent;
+          }
         }
       }
     }
@@ -392,16 +553,12 @@ export class BlazeSimulation {
     for (const patch of this.burned) patch.age += dt;
     this.burned = this.burned.filter((patch) => patch.age < recoverySeconds);
 
-    if (now - this.lastSpread >= this.scaling.spreadMs) {
+    this.modeController.update(this, dt, elapsed);
+    if (this.complete) return;
+
+    if (now - this.lastSpread >= this.modeController.spreadInterval(this)) {
       this.lastSpread = now;
-      if (this.fires.length) {
-        const source = this.fires[Math.floor(Math.random() * this.fires.length)];
-        const angle = Math.random() * Math.PI * 2;
-        const d = 55 + Math.random() * 80;
-        this.spawnFire(source.x + Math.cos(angle) * d, source.y + Math.sin(angle) * d);
-      } else {
-        this.spawnFire();
-      }
+      this.modeController.spread(this);
     }
   }
 }

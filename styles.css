@@ -45,6 +45,32 @@ button { touch-action: manipulation; }
 .stack { display: grid; gap: 12px; }
 .grow { flex: 1 1 180px; }
 .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.mode-card { width: min(94vw, 980px); }
+.mode-title { margin: 0; text-align: center; font-size: clamp(1.65rem, 5vw, 2.65rem); }
+.mode-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+.mission-card {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 14px;
+  border: 1px solid rgba(255,255,255,.15);
+  border-radius: 16px;
+  background: rgba(255,255,255,.055);
+}
+.mission-card.selected-mission { border-color: rgba(244,185,66,.85); }
+.mission-heading { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
+.mission-heading h2 { margin: 0; font-size: 1.03rem; }
+.mission-card p { min-height: 38px; margin: 0; color: rgba(255,255,255,.82); font-size: .85rem; }
+.mission-card button { min-height: 42px; padding: 9px 14px; }
+.mission-tag {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 7px;
+  background: rgba(244,185,66,.18);
+  color: #ffd989;
+  font-size: .61rem;
+  font-weight: 850;
+}
 
 button, .button {
   border: 0;
@@ -86,7 +112,7 @@ label { display: grid; gap: 6px; font-size: .92rem; opacity: .96; }
 
 .game-screen { position: relative; width: 100vw; height: 100dvh; overflow: hidden; background: #79b85a; touch-action: none; }
 #game-canvas { width: 100%; height: 100%; display: block; touch-action: none; }
-.hud { position: absolute; inset: max(10px, env(safe-area-inset-top)) 10px auto 10px; display: flex; gap: 8px; justify-content: space-between; pointer-events: none; }
+.hud { position: absolute; inset: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) auto max(10px, env(safe-area-inset-left)); display: flex; gap: 8px; justify-content: space-between; pointer-events: none; }
 .hud-group { display: flex; gap: 8px; flex-wrap: wrap; }
 .hud-pill { background: rgba(8,18,12,.76); border: 1px solid rgba(255,255,255,.18); border-radius: 999px; padding: 7px 11px; font-weight: 800; font-size: .86rem; }
 
@@ -141,4 +167,23 @@ label { display: grid; gap: 6px; font-size: .92rem; opacity: .96; }
 
 @media (pointer: fine) {
   .joystick-zone { display: none; }
+}
+
+@media (max-width: 520px) {
+  .card { padding: 16px; }
+  .mode-grid { grid-template-columns: 1fr; }
+  .hud { gap: 4px; }
+  .hud-group { gap: 4px; }
+  .hud-pill { padding: 6px 8px; font-size: .7rem; }
+}
+
+@media (max-height: 500px) {
+  .screen { padding-top: max(10px, env(safe-area-inset-top)); padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .card { padding: 14px; }
+  .stack { gap: 9px; }
+  .mission-card { gap: 5px; padding: 10px; }
+  .mission-card p { min-height: 0; }
+  .hud-pill { padding: 5px 8px; font-size: .73rem; }
+  .joystick-zone { bottom: calc(max(12px, env(safe-area-inset-bottom)) + 28px); width: 146px; height: 146px; }
+  .joystick-knob { width: 64px; height: 64px; }
 }

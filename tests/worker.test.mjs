@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DIFFICULTIES } from '../src/game/config.js';
+import {
+  GAME_MODES,
+  SNAPSHOT_VERSION,
+  defaultLevelForMode,
+  fireLimitForMode,
+  playableModes,
+  roundDurationForMode,
+} from '../src/game/modes.js';
 import { scaleForPlayers } from '../src/game/scaling.js';
+import { BlazeSimulation } from '../src/game/simulation.js';
 import {
   createContext,
   createFixture,
@@ -351,4 +360,290 @@ test('the Durable Object rejects malformed initial host credentials', async () =
     body: JSON.stringify({ code: 'TEST', hostId: 'host-id', sessionToken: 'short' }),
   }));
   assert.equal(response.status, 400);
+});
+
+test('new room requests preserve the selected mission and level before anyone connects', async () => {
+  let forwarded;
+  const env = {
+    GAME_ROOMS: {
+      idFromName(code) { return code; },
+      get() {
+        return {
+          async fetch(request) {
+            forwarded = await request.json();
+            return { status: 200, ok: true };
+          },
+        };
+      },
+    },
+  };
+
+  const response = await worker.fetch(new Request('https://example.test/api/rooms', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      hostId: 'host-id',
+      hostName: 'Micah',
+      sessionToken: tokenFor('host-id'),
+      mode: 'convoy-protection',
+      level: 'endless-fire-road',
+    }),
+  }), env);
+
+  assert.equal(response.status, 201);
+  assert.equal(forwarded.mode, 'convoy-protection');
+  assert.equal(forwarded.level, 'endless-fire-road');
+});
+
+test('room creation rejects invalid mission and level combinations', async () => {
+  const game = new GameRoom(createContext(), {});
+  const response = await game.fetch(new Request('https://example.test/api/rooms/TEST/init', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      code: 'TEST',
+      hostId: 'host-id',
+      hostName: 'Host',
+      sessionToken: tokenFor('host-id'),
+      mode: 'protect-town',
+      level: 'endless-fire-road',
+    }),
+  }));
+  assert.equal(response.status, 400);
+});
+
+test('every selectable mission starts with the correct shared mode and timer behavior', async () => {
+  for (const mode of playableModes()) {
+    const { game } = await createFixture({ mode: mode.id, start: true });
+    const room = await game.getRoom();
+    assert.equal(room.mode, mode.id);
+    assert.equal(room.level, defaultLevelForMode(mode.id));
+
+    const duration = roundDurationForMode(mode.id, room.level, 150);
+    if (duration === null) {
+      assert.equal(room.roundEndsAt, null, mode.id);
+    } else {
+      assert.ok(room.roundEndsAt > Date.now() + (duration - 2) * 1000, mode.id);
+      assert.ok(room.roundEndsAt <= Date.now() + duration * 1000, mode.id);
+    }
+  }
+});
+
+test('endless rooms still replace a stalled multiplayer host without imposing a round deadline', async () => {
+  for (const mode of ['wildfire-survival', 'convoy-protection']) {
+    const { game } = await createFixture({ mode, start: true });
+    const room = await game.getRoom();
+    assert.equal(room.roundEndsAt, null);
+    room.hostAssignedAt = Date.now() - 7000;
+    room.snapshotSavedAt = Date.now() - 7000;
+    await game.saveRoom(room);
+    await game.alarm();
+
+    const updated = await game.getRoom();
+    assert.equal(updated.phase, 'playing');
+    assert.equal(updated.roundEndsAt, null);
+    assert.equal(updated.hostId, 'guest-0');
+  }
+});
+
+test('all mission objectives, random events, and moving objects reach every guest identically', async () => {
+  for (const mode of playableModes()) {
+    const { game, host, guests } = await createFixture({ mode: mode.id, guests: 2, start: true });
+    const room = await game.getRoom();
+    const simulation = new BlazeSimulation({
+      width: 1200,
+      height: 700,
+      players: room.players,
+      difficulty: room.difficulty,
+      round: room.round,
+      mode: room.mode,
+      level: room.level,
+      roundEndsAt: room.roundEndsAt,
+    });
+
+    simulation.state.elapsed = 34;
+    simulation.state.teamWaterDropped = 48;
+    if (mode.id === 'protect-town') {
+      simulation.state.buildings[0].hp = 61;
+      simulation.state.buildings[0].status = 'burning';
+    }
+    if (mode.id === 'spot-fire') {
+      simulation.state.warnings.push({
+        id: 'warning-shared', x: 850, y: 320, timeLeft: 1.4, duration: 2.4, kind: 'spot',
+      });
+    }
+    if (mode.id === 'evacuation') {
+      simulation.state.units.push({
+        id: 'vehicle-shared', kind: 'bus', x: 410, y: 350, progress: .35,
+        hp: 79, maxHp: 100, status: 'blocked',
+      });
+      simulation.state.routeBlocked = true;
+      simulation.state.evacuated = 2;
+    }
+    if (mode.id === 'convoy-protection') {
+      simulation.state.distanceMeters = 2680;
+      simulation.state.convoyIntegrity = 72;
+      simulation.state.convoyVehicles[0].hp = 64;
+    }
+
+    await game.webSocketMessage(host, JSON.stringify({
+      type: 'matchSnapshot',
+      snapshot: simulation.createSnapshot(),
+    }));
+
+    const first = guests[0].sent.findLast((message) => message.type === 'matchSnapshot').snapshot;
+    const second = guests[1].sent.findLast((message) => message.type === 'matchSnapshot').snapshot;
+    assert.deepEqual(first, second, mode.id);
+    assert.equal(first.version, SNAPSHOT_VERSION);
+    assert.equal(first.mode, mode.id);
+    assert.equal(first.modeState.elapsed, 34);
+    assert.equal(first.modeState.teamWaterDropped, 48);
+
+    const guestSimulation = new BlazeSimulation({
+      width: 430,
+      height: 932,
+      players: room.players,
+      difficulty: room.difficulty,
+      round: room.round,
+      mode: room.mode,
+      level: room.level,
+      roundEndsAt: room.roundEndsAt,
+      spawnInitialFires: false,
+    });
+    assert.equal(guestSimulation.applySnapshot(first), true, mode.id);
+    assert.equal(guestSimulation.fires.length, simulation.fires.length, mode.id);
+    assert.equal(guestSimulation.state.teamWaterDropped, 48, mode.id);
+
+    if (mode.id === 'protect-town') {
+      assert.equal(first.modeState.buildings[0].hp, 61);
+      assert.equal(guestSimulation.state.buildings[0].hp, 61);
+    }
+    if (mode.id === 'spot-fire') {
+      assert.equal(first.modeState.warnings[0].id, 'warning-shared');
+      assert.equal(guestSimulation.state.warnings[0].id, 'warning-shared');
+    }
+    if (mode.id === 'evacuation') {
+      assert.equal(first.modeState.units[0].status, 'blocked');
+      assert.equal(first.modeState.evacuated, 2);
+      assert.equal(guestSimulation.state.units[0].status, 'blocked');
+    }
+    if (mode.id === 'convoy-protection') {
+      assert.equal(first.modeState.distanceMeters, 2680);
+      assert.equal(first.modeState.convoyIntegrity, 72);
+      assert.equal(first.modeState.convoyVehicles[0].hp, 64);
+      assert.ok(first.modeState.chunks.length > 0);
+      assert.equal(guestSimulation.state.convoyVehicles[0].hp, 64);
+      assert.equal(guestSimulation.state.chunks.length, first.modeState.chunks.length);
+    }
+  }
+});
+
+test('mission snapshots reject objective objects that do not belong to the active mode', async () => {
+  const { game } = await createFixture({ mode: 'protect-town', start: true });
+  const room = await game.getRoom();
+  const sanitized = sanitizeSnapshot(makeSnapshot(room, {
+    modeState: {
+      warnings: [{ id: 'fake-warning', x: .5, y: .5 }],
+      units: [{ id: 'fake-unit', x: .5, y: .5 }],
+      convoyVehicles: [{ id: 'fake-convoy', x: .5, y: .5 }],
+      chunks: [{ index: 5, x: .2, width: .6 }],
+      buildings: [{ id: 'real-building', x: .8, y: .3, hp: 500, status: 'unsafe' }],
+    },
+  }), room);
+
+  assert.deepEqual(sanitized.modeState.warnings, []);
+  assert.deepEqual(sanitized.modeState.units, []);
+  assert.deepEqual(sanitized.modeState.convoyVehicles, []);
+  assert.deepEqual(sanitized.modeState.chunks, []);
+  assert.equal(sanitized.modeState.buildings[0].hp, 100);
+  assert.equal(sanitized.modeState.buildings[0].status, 'safe');
+});
+
+test('convoy snapshots clamp unsafe chunks, vehicles, integrity, and fire health', async () => {
+  const { game } = await createFixture({ mode: 'convoy-protection', start: true });
+  const room = await game.getRoom();
+  const sanitized = sanitizeSnapshot(makeSnapshot(room, {
+    fires: [{ x: 4, y: -2, hp: 9999, radius: 5, kind: 'unsafe' }],
+    modeState: {
+      distanceMeters: -100,
+      convoyIntegrity: 999,
+      convoyVehicles: [{ id: '<bad>', kind: 'unsafe', x: 8, y: -1, hp: 400, status: 'unsafe' }],
+      chunks: Array.from({ length: 15 }, (_, index) => ({ index, x: 20, width: 9, variant: 200 })),
+    },
+  }), room);
+
+  assert.equal(sanitized.fires[0].hp, GAME_MODES['convoy-protection'].rules.maximumFireHealth);
+  assert.equal(sanitized.fires[0].kind, 'wildfire');
+  assert.equal(sanitized.modeState.distanceMeters, 0);
+  assert.equal(sanitized.modeState.convoyIntegrity, 100);
+  assert.equal(sanitized.modeState.convoyVehicles[0].kind, 'utility');
+  assert.equal(sanitized.modeState.convoyVehicles[0].x, 1);
+  assert.equal(sanitized.modeState.convoyVehicles[0].hp, 100);
+  assert.equal(sanitized.modeState.chunks.length, GAME_MODES['convoy-protection'].rules.maximumChunks);
+  assert.equal(sanitized.modeState.chunks[0].x, 4);
+  assert.equal(sanitized.modeState.chunks[0].width, 1.5);
+});
+
+test('mission fire budgets preserve every synchronized fire even after a teammate disconnects', async () => {
+  const { game, host, guests } = await createFixture({ mode: 'wildfire-survival', guests: 5, start: true });
+  const room = await game.getRoom();
+  const limit = fireLimitForMode(room.mode, scaleForPlayers(6, DIFFICULTIES.normal).maxFires);
+  const fires = Array.from({ length: limit }, (_, index) => ({
+    x: (index + 1) / (limit + 2), y: .5, hp: 120, radius: .03, kind: 'wildfire',
+  }));
+
+  await game.webSocketClose(guests[0]);
+  const current = await game.getRoom();
+  await game.webSocketMessage(host, JSON.stringify({
+    type: 'matchSnapshot',
+    snapshot: makeSnapshot(current, { fires }),
+  }));
+
+  const shared = guests[1].sent.findLast((message) => message.type === 'matchSnapshot').snapshot;
+  assert.equal(shared.fires.length, limit);
+});
+
+test('rejoining a moving convoy restores the same distance, vehicles, and live map chunks', async () => {
+  const { game, host, guests, connect } = await createFixture({ mode: 'convoy-protection', start: true });
+  const room = await game.getRoom();
+  const simulation = new BlazeSimulation({
+    width: 1000,
+    height: 600,
+    players: room.players,
+    mode: room.mode,
+    level: room.level,
+  });
+  simulation.state.distanceMeters = 3400;
+  simulation.state.convoyIntegrity = 68;
+  await game.webSocketMessage(host, JSON.stringify({
+    type: 'matchSnapshot',
+    snapshot: simulation.createSnapshot(),
+  }));
+
+  await game.webSocketClose(guests[0]);
+  const replacement = await connect('guest-0', 'Returning teammate');
+  const restored = replacement.socket.sent.findLast((message) => message.type === 'matchSnapshot');
+
+  assert.equal(restored.restore, true);
+  assert.equal(restored.snapshot.modeState.distanceMeters, 3400);
+  assert.equal(restored.snapshot.modeState.convoyIntegrity, 68);
+  assert.equal(restored.snapshot.modeState.convoyVehicles.length, 4);
+  assert.ok(restored.snapshot.modeState.chunks.length > 0);
+});
+
+test('a guest cannot inject fake mission objectives or moving convoy state', async () => {
+  const { game, guests } = await createFixture({ mode: 'convoy-protection', start: true });
+  const room = await game.getRoom();
+  const sentBefore = guests[0].sent.length;
+
+  await game.webSocketMessage(guests[0], JSON.stringify({
+    type: 'matchSnapshot',
+    snapshot: makeSnapshot(room, {
+      complete: true,
+      modeState: { outcome: 'won', distanceMeters: 999999, convoyIntegrity: 100 },
+    }),
+  }));
+
+  assert.equal((await game.getRoom()).phase, 'playing');
+  assert.equal(guests[0].sent.length, sentBefore);
 });

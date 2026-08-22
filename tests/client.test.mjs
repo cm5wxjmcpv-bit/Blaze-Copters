@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { DIFFICULTIES, HELICOPTER_COLORS } from '../src/game/config.js';
-import { GAME_MODES, levelsForMode } from '../src/game/modes.js';
+import {
+  GAME_MODES,
+  defaultLevelForMode,
+  levelsForMode,
+  nextLevelForMode,
+  playableModes,
+} from '../src/game/modes.js';
 import { BlazeSimulation } from '../src/game/simulation.js';
 
 const clientSource = (await readFile(new URL('../src/main.js', import.meta.url), 'utf8'))
@@ -33,12 +39,14 @@ class FakeElement {
     this.owner.content.clear();
     this.owner.colorButtons = [];
     this.owner.upgradeButtons = [];
+    this.owner.modeButtons = [];
     const tags = value.matchAll(/<([a-z]+)\b([^>]*)>/gi);
     for (const [, tag, attributes] of tags) {
       const id = attributes.match(/\bid="([^"]+)"/)?.[1] || '';
       const color = attributes.match(/\bdata-color="([^"]+)"/)?.[1];
       const upgrade = attributes.match(/\bdata-upgrade="([^"]+)"/)?.[1];
-      if (!id && !color && !upgrade) continue;
+      const mode = attributes.match(/\bdata-mode="([^"]+)"/)?.[1];
+      if (!id && !color && !upgrade && !mode) continue;
 
       const element = new FakeElement(this.owner, id, tag.toLowerCase());
       element.disabled = /\bdisabled\b/.test(attributes);
@@ -50,6 +58,10 @@ class FakeElement {
       if (upgrade) {
         element.dataset.upgrade = upgrade;
         this.owner.upgradeButtons.push(element);
+      }
+      if (mode) {
+        element.dataset.mode = mode;
+        this.owner.modeButtons.push(element);
       }
       if (id) this.owner.content.set(id, element);
     }
@@ -106,6 +118,7 @@ function createRuntime({ saved = {}, search = '', preview = null } = {}) {
     detached: new Map(),
     colorButtons: [],
     upgradeButtons: [],
+    modeButtons: [],
     querySelector(selector) {
       if (selector === '#app') return this.app;
       if (selector.startsWith('#')) return this.detached.get(selector.slice(1)) || this.content.get(selector.slice(1)) || null;
@@ -113,6 +126,7 @@ function createRuntime({ saved = {}, search = '', preview = null } = {}) {
     },
     querySelectorAll(selector) {
       if (selector === '[data-color]') return this.colorButtons;
+      if (selector === '[data-mode]') return this.modeButtons;
       if (selector === '.upgrade-choice') return this.upgradeButtons;
       return [];
     },
@@ -230,7 +244,10 @@ function createRuntime({ saved = {}, search = '', preview = null } = {}) {
     'DIFFICULTIES',
     'HELICOPTER_COLORS',
     'GAME_MODES',
+    'defaultLevelForMode',
     'levelsForMode',
+    'nextLevelForMode',
+    'playableModes',
     'BlazeSimulation',
     'attachJoystick',
     'drawSimulation',
@@ -252,7 +269,10 @@ function createRuntime({ saved = {}, search = '', preview = null } = {}) {
     DIFFICULTIES,
     HELICOPTER_COLORS,
     GAME_MODES,
+    defaultLevelForMode,
     levelsForMode,
+    nextLevelForMode,
+    playableModes,
     BlazeSimulation,
     () => {},
     () => {},
@@ -268,6 +288,7 @@ function createRuntime({ saved = {}, search = '', preview = null } = {}) {
     sockets,
     requests,
     animationFrames,
+    window,
     WebSocket: FakeWebSocket,
   };
 }
@@ -322,6 +343,46 @@ test('mobile zoom remains locked while oversized lobby screens remain scrollable
   assert.match(pageMarkup, /gesturestart/);
   assert.match(pageStyles, /\.screen\s*\{[^}]*overflow-y:\s*auto/s);
   assert.match(pageStyles, /\.game-screen\s*\{[^}]*touch-action:\s*none/s);
+  assert.match(pageStyles, /\.game-screen\s*\{[^}]*overflow:\s*hidden/s);
+  assert.match(pageStyles, /\.mode-grid\s*\{/);
+});
+
+test('creating a game first displays exactly five clear playable mission cards', async () => {
+  const runtime = createRuntime();
+  const name = runtime.document.querySelector('#player-name');
+  name.value = 'Micah';
+  await runtime.document.querySelector('#create-game').trigger('click');
+
+  assert.equal(runtime.client.session.view, 'mode-select');
+  assert.equal(runtime.document.modeButtons.length, 5);
+  assert.match(runtime.document.app.innerHTML, /Wildfire Survival/);
+  assert.match(runtime.document.app.innerHTML, /Protect the Town/);
+  assert.match(runtime.document.app.innerHTML, /Spot Fire/);
+  assert.match(runtime.document.app.innerHTML, /Evacuation/);
+  assert.match(runtime.document.app.innerHTML, /Convoy Protection/);
+  assert.doesNotMatch(runtime.document.app.innerHTML, /Classic Co-op/);
+});
+
+test('choosing a mission creates the room with its authoritative mode and first level', async () => {
+  const runtime = createRuntime();
+  runtime.document.querySelector('#player-name').value = 'Micah';
+  await runtime.document.querySelector('#create-game').trigger('click');
+  const creating = runtime.document.querySelector('#play-mode-evacuation').trigger('click');
+
+  for (let index = 0; index < 5 && !runtime.sockets.length; index += 1) await Promise.resolve();
+  const socket = runtime.sockets.at(-1);
+  assert.ok(socket);
+  const payload = JSON.parse(runtime.requests[0].options.body);
+  assert.equal(payload.mode, 'evacuation');
+  assert.equal(payload.level, 'cedar-creek-road');
+
+  socket.receive({
+    type: 'state',
+    room: roomFor(runtime, { mode: 'evacuation', level: 'cedar-creek-road' }),
+  });
+  await creating;
+  assert.equal(runtime.client.session.view, 'lobby');
+  assert.match(runtime.document.app.innerHTML, /Cedar Creek Road/);
 });
 
 test('the lobby shows the current mode and starter level selectors', async () => {
@@ -331,6 +392,22 @@ test('the lobby shows the current mode and starter level selectors', async () =>
   assert.match(runtime.document.app.innerHTML, /Starter Training Grounds/);
   assert.ok(runtime.document.querySelector('#game-mode'));
   assert.ok(runtime.document.querySelector('#game-level'));
+});
+
+test('a connected host can reopen the mission screen and choose a synchronized new mode', async () => {
+  const runtime = createRuntime();
+  const socket = await connectHost(runtime);
+  await runtime.document.querySelector('#choose-game-mode').trigger('click');
+  assert.equal(runtime.client.session.view, 'mode-select');
+
+  await runtime.document.querySelector('#play-mode-protect-town').trigger('click');
+  assert.deepEqual(socket.sent.at(-1), { type: 'setMode', mode: 'protect-town' });
+  socket.receive({
+    type: 'state',
+    room: roomFor(runtime, { mode: 'protect-town', level: 'pine-ridge-town' }),
+  });
+  assert.equal(runtime.client.session.view, 'lobby');
+  assert.match(runtime.document.app.innerHTML, /Protect the Town/);
 });
 
 test('an active host publishes snapshots containing the current mode and level', async () => {
@@ -347,6 +424,75 @@ test('an active host publishes snapshots containing the current mode and level',
   const snapshot = socket.sent.find((message) => message.type === 'matchSnapshot').snapshot;
   assert.equal(snapshot.mode, 'classic');
   assert.equal(snapshot.level, 'starter');
+});
+
+test('the mobile-friendly HUD changes objectives for each playable mission', async () => {
+  const expectations = {
+    'wildfire-survival': ['Time', 'Danger'],
+    'protect-town': ['Town', 'burning'],
+    'spot-fire': ['Ember watch', 'Embers'],
+    evacuation: ['Evac', 'remaining'],
+    'convoy-protection': ['Distance', 'Convoy'],
+  };
+
+  for (const mode of playableModes()) {
+    const runtime = createRuntime();
+    const level = defaultLevelForMode(mode.id);
+    const socket = await connectHost(runtime, { mode: mode.id, level });
+    socket.receive({
+      type: 'state',
+      room: roomFor(runtime, {
+        mode: mode.id,
+        level,
+        phase: 'playing',
+        roundEndsAt: mode.endless ? null : Date.now() + 240000,
+      }),
+    });
+
+    const frame = runtime.animationFrames.shift();
+    frame(performance.now() + 100);
+    const round = runtime.document.querySelector('#round-hud').textContent;
+    const fire = runtime.document.querySelector('#fire-hud').textContent;
+    const objective = runtime.document.querySelector('#objective-hud').textContent;
+    const displayed = `${round} ${fire} ${objective}`;
+    for (const phrase of expectations[mode.id]) assert.match(displayed, new RegExp(phrase), mode.id);
+    assert.match(runtime.document.querySelector('#water-hud').textContent, /Water/);
+  }
+});
+
+test('keyboard movement keeps using the shared multiplayer input channel', async () => {
+  const runtime = createRuntime();
+  const socket = await connectHost(runtime);
+  socket.receive({
+    type: 'state',
+    room: roomFor(runtime, { phase: 'playing', roundEndsAt: Date.now() + 150000 }),
+  });
+
+  runtime.window.onkeydown({ code: 'KeyD' });
+  assert.deepEqual(socket.sent.at(-1), { type: 'input', x: 1, y: 0 });
+  runtime.window.onkeyup({ code: 'KeyD' });
+  assert.deepEqual(socket.sent.at(-1), { type: 'input', x: 0, y: 0 });
+});
+
+test('all playable missions keep gameplay free of extra action buttons', async () => {
+  for (const mode of playableModes()) {
+    const runtime = createRuntime();
+    const level = defaultLevelForMode(mode.id);
+    const socket = await connectHost(runtime, { mode: mode.id, level });
+    socket.receive({
+      type: 'state',
+      room: roomFor(runtime, {
+        mode: mode.id,
+        level,
+        phase: 'playing',
+        roundEndsAt: mode.endless ? null : Date.now() + 240000,
+      }),
+    });
+
+    assert.doesNotMatch(runtime.document.app.innerHTML, /<button\b/i, mode.id);
+    assert.ok(runtime.document.querySelector('#joystick'));
+    assert.ok(runtime.document.querySelector('#game-canvas'));
+  }
 });
 
 test('a disconnected browser automatically reconnects with its original credentials', async () => {
@@ -426,4 +572,57 @@ test('a player reconnecting at round end receives a usable result screen', async
     },
   });
   assert.match(runtime.document.app.innerHTML, /<strong>7<\/strong>/);
+});
+
+test('convoy results show team distance and offer replay, mission selection, and the main menu', async () => {
+  const runtime = createRuntime();
+  const mode = 'convoy-protection';
+  const level = defaultLevelForMode(mode);
+  const socket = await connectHost(runtime, { mode, level });
+  socket.receive({ type: 'state', room: roomFor(runtime, { mode, level, phase: 'playing' }) });
+  runtime.client.session.sim.state.distanceMeters = 3218.688;
+  runtime.client.session.sim.state.highestDifficulty = 4;
+  runtime.client.session.sim.finish('lost', 'The convoy could not continue.');
+  socket.receive({
+    type: 'state',
+    room: roomFor(runtime, {
+      mode,
+      level,
+      phase: 'roundEnd',
+      selectedUpgrade: 'tank',
+      upgrades: { tank: 1, speed: 0, power: 0 },
+    }),
+  });
+
+  assert.match(runtime.document.app.innerHTML, /2\.00 mi/);
+  assert.match(runtime.document.app.innerHTML, /convoy distance/);
+  assert.ok(runtime.document.querySelector('#lobby-button'));
+  assert.ok(runtime.document.querySelector('#round-game-modes'));
+  assert.ok(runtime.document.querySelector('#leave-round'));
+  assert.equal(runtime.document.querySelector('#lobby-button').disabled, false);
+});
+
+test('a host can return directly from round results to the shared mission menu', async () => {
+  const runtime = createRuntime();
+  const mode = 'protect-town';
+  const level = defaultLevelForMode(mode);
+  const socket = await connectHost(runtime, { mode, level });
+  socket.receive({ type: 'state', room: roomFor(runtime, { mode, level, phase: 'playing' }) });
+  runtime.client.session.sim.finish('won', 'The town was saved.');
+  socket.receive({
+    type: 'state',
+    room: roomFor(runtime, {
+      mode,
+      level,
+      phase: 'roundEnd',
+      selectedUpgrade: 'speed',
+      upgrades: { tank: 0, speed: 1, power: 0 },
+    }),
+  });
+
+  await runtime.document.querySelector('#round-game-modes').trigger('click');
+  assert.deepEqual(socket.sent.at(-1), { type: 'returnLobby' });
+  socket.receive({ type: 'state', room: roomFor(runtime, { mode, level, round: 2 }) });
+  assert.equal(runtime.client.session.view, 'mode-select');
+  assert.equal(runtime.document.modeButtons.length, 5);
 });

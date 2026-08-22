@@ -4,9 +4,15 @@ import { DIFFICULTIES } from '../../src/game/config.js';
 import {
   DEFAULT_LEVEL_ID,
   DEFAULT_MODE_ID,
+  GAME_LEVELS,
+  GAME_MODES,
+  SNAPSHOT_VERSION,
   defaultLevelForMode,
+  fireLimitForMode,
   isValidLevel,
   isValidMode,
+  maximumFireHealth,
+  roundDurationForMode,
 } from '../../src/game/modes.js';
 import { scaleForPlayers } from '../../src/game/scaling.js';
 
@@ -81,9 +87,15 @@ const loadWorker = new Function(
   'DIFFICULTIES',
   'DEFAULT_LEVEL_ID',
   'DEFAULT_MODE_ID',
+  'GAME_LEVELS',
+  'GAME_MODES',
+  'SNAPSHOT_VERSION',
   'defaultLevelForMode',
+  'fireLimitForMode',
   'isValidLevel',
   'isValidMode',
+  'maximumFireHealth',
+  'roundDurationForMode',
   'scaleForPlayers',
   `${runnableWorkerSource}\nreturn { GameRoom, worker, sanitizeSnapshot };`,
 );
@@ -95,9 +107,15 @@ export const { GameRoom, worker, sanitizeSnapshot } = loadWorker(
   DIFFICULTIES,
   DEFAULT_LEVEL_ID,
   DEFAULT_MODE_ID,
+  GAME_LEVELS,
+  GAME_MODES,
+  SNAPSHOT_VERSION,
   defaultLevelForMode,
+  fireLimitForMode,
   isValidLevel,
   isValidMode,
+  maximumFireHealth,
+  roundDurationForMode,
   scaleForPlayers,
 );
 
@@ -136,7 +154,7 @@ export function createContext() {
   };
 }
 
-export async function createFixture({ guests = 1, start = false } = {}) {
+export async function createFixture({ guests = 1, start = false, mode = DEFAULT_MODE_ID, level = defaultLevelForMode(mode) } = {}) {
   const ctx = createContext();
   const game = new GameRoom(ctx, {});
   const init = new Request('https://example.test/api/rooms/TEST/init', {
@@ -147,6 +165,8 @@ export async function createFixture({ guests = 1, start = false } = {}) {
       hostId: 'host-id',
       hostName: 'Host',
       sessionToken: tokenFor('host-id'),
+      mode,
+      level,
     }),
   });
   assert.equal((await game.fetch(init)).status, 200);
@@ -181,7 +201,7 @@ export async function createFixture({ guests = 1, start = false } = {}) {
 
 export function makeSnapshot(room, overrides = {}) {
   return {
-    version: 2,
+    version: SNAPSHOT_VERSION,
     round: room.round,
     mode: room.mode,
     level: room.level,
