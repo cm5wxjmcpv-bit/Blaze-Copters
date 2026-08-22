@@ -15,6 +15,8 @@ Each mission currently has one starter map. Classic Co-op remains available inte
 ## Shared gameplay
 
 - One to six players, with a different helicopter color for each player.
+- Four expressive animated helicopter choices: Chinook, Kamov, Skycrane, and Firehawk.
+- Helicopter selection is cosmetic only; every aircraft has identical speed, water capacity, and fire suppression.
 - Touch joystick on mobile; arrow keys or WASD on a computer.
 - Automatic water drops over fires and automatic refills over the lake.
 - Fire spread and difficulty scale with the number of connected players.
@@ -31,7 +33,7 @@ The current room host runs the lightweight shared gameplay simulation. Guest bro
 
 Game modes, map layouts, mission rules, and available levels are registered in `src/game/modes.js`. Mode-specific rule controllers live in `src/game/mode-controllers.js`, while `src/game/simulation.js` retains the single shared movement, water, fire, scoring, snapshot, and upgrade engine. Both the browser and the Cloudflare Worker use the same registry. Add new levels to a mode's level list; the result screen will offer the next level when one exists.
 
-The current houses, cars, buses, convoy trucks, ember warnings, helicopters, and scrolling scenery are intentionally lightweight canvas/vector placeholders until final game art is designed.
+The four selectable helicopter characters use lightweight animated vector artwork with expressive eyes, spinning rotors, hovering movement, swaying buckets, and visible water drops. Houses, cars, buses, convoy trucks, ember warnings, and scrolling scenery remain lightweight canvas/vector artwork.
 
 ## Local development
 

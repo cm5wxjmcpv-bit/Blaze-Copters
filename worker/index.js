@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { DIFFICULTIES } from "../src/game/config.js";
+import { DEFAULT_HELICOPTER_TYPE, DIFFICULTIES, HELICOPTER_TYPES } from "../src/game/config.js";
 import {
   DEFAULT_LEVEL_ID,
   DEFAULT_MODE_ID,
@@ -17,6 +17,7 @@ import { scaleForPlayers } from "../src/game/scaling.js";
 
 const ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const COLOR_IDS = new Set(["red", "blue", "yellow", "green", "purple", "orange"]);
+const HELICOPTER_TYPE_IDS = new Set(HELICOPTER_TYPES.map((type) => type.id));
 const DIFFICULTY_IDS = new Set(Object.keys(DIFFICULTIES));
 const UPGRADE_IDS = new Set(["tank", "speed", "power"]);
 const MAX_PLAYERS = 6;
@@ -233,7 +234,7 @@ function sanitizeSnapshot(rawSnapshot, room) {
   if (!rawSnapshot || Number(rawSnapshot.round) !== room.round) return null;
   if (rawSnapshot.mode !== room.mode || rawSnapshot.level !== room.level) return null;
 
-  const activeIds = new Set(connectedPlayers(room).map((player) => player.id));
+  const activePlayersById = new Map(connectedPlayers(room).map((player) => [player.id, player]));
   const difficulty = DIFFICULTIES[room.difficulty] ?? DIFFICULTIES.normal;
   const fireLimit = Math.min(
     MAX_SYNCED_FIRES,
@@ -269,17 +270,23 @@ function sanitizeSnapshot(rawSnapshot, room) {
   const helicopters = Array.isArray(rawSnapshot.helicopters)
     ? rawSnapshot.helicopters
         .slice(0, MAX_PLAYERS)
-        .filter((heli) => activeIds.has(String(heli?.id ?? "")))
-        .map((heli) => ({
-          id: String(heli.id),
-          x: clampNumber(heli.x, 0, 1, .31),
-          y: clampNumber(heli.y, 0, 1, .24),
-          vx: clampNumber(heli.vx, -1, 1, 0),
-          vy: clampNumber(heli.vy, -1, 1, 0),
-          water: clampNumber(heli.water, 0, 1000, 100),
-          capacity: clampNumber(heli.capacity, 1, 1000, 100),
-          refillProgress: clampNumber(heli.refillProgress, 0, 100, 0),
-        }))
+        .filter((heli) => activePlayersById.has(String(heli?.id ?? "")))
+        .map((heli) => {
+          const player = activePlayersById.get(String(heli.id));
+          return {
+            id: String(heli.id),
+            helicopterType: HELICOPTER_TYPE_IDS.has(player?.helicopterType)
+              ? player.helicopterType
+              : DEFAULT_HELICOPTER_TYPE,
+            x: clampNumber(heli.x, 0, 1, .31),
+            y: clampNumber(heli.y, 0, 1, .24),
+            vx: clampNumber(heli.vx, -1, 1, 0),
+            vy: clampNumber(heli.vy, -1, 1, 0),
+            water: clampNumber(heli.water, 0, 1000, 100),
+            capacity: clampNumber(heli.capacity, 1, 1000, 100),
+            refillProgress: clampNumber(heli.refillProgress, 0, 100, 0),
+          };
+        })
     : [];
 
   const durationSeconds = roundDurationForMode(room.mode, room.level, difficulty.roundSeconds);
@@ -411,6 +418,7 @@ export class GameRoom extends DurableObject {
           id: hostId,
           name: cleanName(payload.hostName),
           colorId: null,
+          helicopterType: DEFAULT_HELICOPTER_TYPE,
           connected: false,
           disconnectedAt: null,
           connectionId: null,
@@ -452,6 +460,7 @@ export class GameRoom extends DurableObject {
           id: playerId,
           name: playerName,
           colorId: null,
+          helicopterType: DEFAULT_HELICOPTER_TYPE,
           connected: false,
           disconnectedAt: null,
           connectionId: null,
@@ -466,6 +475,7 @@ export class GameRoom extends DurableObject {
       ));
       const connectionId = crypto.randomUUID();
       player.name = playerName;
+      if (!HELICOPTER_TYPE_IDS.has(player.helicopterType)) player.helicopterType = DEFAULT_HELICOPTER_TYPE;
       player.connected = true;
       player.disconnectedAt = null;
       player.connectionId = connectionId;
@@ -570,6 +580,15 @@ export class GameRoom extends DurableObject {
         return;
       }
       player.colorId = colorId;
+      await this.broadcastRoom(room);
+      return;
+    }
+
+    if (message.type === "setHelicopter") {
+      if (room.phase !== "lobby") return;
+      const helicopterType = String(message.helicopterType ?? "");
+      if (!HELICOPTER_TYPE_IDS.has(helicopterType)) return;
+      player.helicopterType = helicopterType;
       await this.broadcastRoom(room);
       return;
     }

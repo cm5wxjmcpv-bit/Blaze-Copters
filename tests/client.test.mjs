@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { DIFFICULTIES, HELICOPTER_COLORS } from '../src/game/config.js';
+import {
+  DEFAULT_HELICOPTER_TYPE,
+  DIFFICULTIES,
+  HELICOPTER_COLORS,
+  HELICOPTER_TYPES,
+} from '../src/game/config.js';
 import {
   GAME_MODES,
   defaultLevelForMode,
@@ -10,6 +15,7 @@ import {
   playableModes,
 } from '../src/game/modes.js';
 import { BlazeSimulation } from '../src/game/simulation.js';
+import { helicopterPreviewMarkup } from '../src/ui/helicopters.js';
 
 const clientSource = (await readFile(new URL('../src/main.js', import.meta.url), 'utf8'))
   .replace(/^import .*;$/gm, '');
@@ -38,15 +44,17 @@ class FakeElement {
 
     this.owner.content.clear();
     this.owner.colorButtons = [];
+    this.owner.helicopterButtons = [];
     this.owner.upgradeButtons = [];
     this.owner.modeButtons = [];
     const tags = value.matchAll(/<([a-z]+)\b([^>]*)>/gi);
     for (const [, tag, attributes] of tags) {
       const id = attributes.match(/\bid="([^"]+)"/)?.[1] || '';
       const color = attributes.match(/\bdata-color="([^"]+)"/)?.[1];
+      const helicopter = attributes.match(/\bdata-helicopter="([^"]+)"/)?.[1];
       const upgrade = attributes.match(/\bdata-upgrade="([^"]+)"/)?.[1];
       const mode = attributes.match(/\bdata-mode="([^"]+)"/)?.[1];
-      if (!id && !color && !upgrade && !mode) continue;
+      if (!id && !color && !helicopter && !upgrade && !mode) continue;
 
       const element = new FakeElement(this.owner, id, tag.toLowerCase());
       element.disabled = /\bdisabled\b/.test(attributes);
@@ -54,6 +62,10 @@ class FakeElement {
       if (color) {
         element.dataset.color = color;
         this.owner.colorButtons.push(element);
+      }
+      if (helicopter) {
+        element.dataset.helicopter = helicopter;
+        this.owner.helicopterButtons.push(element);
       }
       if (upgrade) {
         element.dataset.upgrade = upgrade;
@@ -117,6 +129,7 @@ function createRuntime({ saved = {}, search = '', preview = null } = {}) {
     content: new Map(),
     detached: new Map(),
     colorButtons: [],
+    helicopterButtons: [],
     upgradeButtons: [],
     modeButtons: [],
     querySelector(selector) {
@@ -126,6 +139,7 @@ function createRuntime({ saved = {}, search = '', preview = null } = {}) {
     },
     querySelectorAll(selector) {
       if (selector === '[data-color]') return this.colorButtons;
+      if (selector === '[data-helicopter]') return this.helicopterButtons;
       if (selector === '[data-mode]') return this.modeButtons;
       if (selector === '.upgrade-choice') return this.upgradeButtons;
       return [];
@@ -241,8 +255,10 @@ function createRuntime({ saved = {}, search = '', preview = null } = {}) {
     'clearTimeout',
     'requestAnimationFrame',
     'devicePixelRatio',
+    'DEFAULT_HELICOPTER_TYPE',
     'DIFFICULTIES',
     'HELICOPTER_COLORS',
+    'HELICOPTER_TYPES',
     'GAME_MODES',
     'defaultLevelForMode',
     'levelsForMode',
@@ -250,6 +266,7 @@ function createRuntime({ saved = {}, search = '', preview = null } = {}) {
     'playableModes',
     'BlazeSimulation',
     'attachJoystick',
+    'helicopterPreviewMarkup',
     'drawSimulation',
     `${clientSource}\nreturn { session, connectToRoom, createOnlineRoom, leaveRoom, roomPreview };`,
   );
@@ -266,8 +283,10 @@ function createRuntime({ saved = {}, search = '', preview = null } = {}) {
     clearFakeTimeout,
     (callback) => animationFrames.push(callback),
     1,
+    DEFAULT_HELICOPTER_TYPE,
     DIFFICULTIES,
     HELICOPTER_COLORS,
+    HELICOPTER_TYPES,
     GAME_MODES,
     defaultLevelForMode,
     levelsForMode,
@@ -275,6 +294,7 @@ function createRuntime({ saved = {}, search = '', preview = null } = {}) {
     playableModes,
     BlazeSimulation,
     () => {},
+    helicopterPreviewMarkup,
     () => {},
   );
 
@@ -310,6 +330,7 @@ function roomFor(runtime, overrides = {}) {
       id: runtime.client.session.playerId,
       name: 'Micah',
       colorId: 'red',
+      helicopterType: DEFAULT_HELICOPTER_TYPE,
       connected: true,
       isHost: true,
     }],
@@ -392,6 +413,43 @@ test('the lobby shows the current mode and starter level selectors', async () =>
   assert.match(runtime.document.app.innerHTML, /Starter Training Grounds/);
   assert.ok(runtime.document.querySelector('#game-mode'));
   assert.ok(runtime.document.querySelector('#game-level'));
+});
+
+test('the lobby presents all four animated, eye-equipped helicopter choices separately from player colors', async () => {
+  const runtime = createRuntime();
+  await connectHost(runtime);
+
+  assert.equal(runtime.document.helicopterButtons.length, 4);
+  assert.deepEqual(runtime.document.helicopterButtons.map((button) => button.dataset.helicopter), [
+    'chinook', 'kamov', 'skycrane', 'firehawk',
+  ]);
+  assert.equal(runtime.document.colorButtons.length, 6);
+  assert.match(runtime.document.app.innerHTML, /Choose your helicopter/);
+  assert.match(runtime.document.app.innerHTML, /Choose your color/);
+  assert.match(runtime.document.app.innerHTML, /Every helicopter flies and fights fire the same/);
+  assert.match(runtime.document.app.innerHTML, /class="preview-rotor/);
+  assert.match(runtime.document.app.innerHTML, /class="preview-bucket"/);
+  assert.match(runtime.document.app.innerHTML, /fill="#fff"/);
+  assert.match(pageStyles, /@keyframes copter-hover/);
+  assert.match(pageStyles, /@keyframes preview-rotor-spin/);
+  assert.match(pageStyles, /@keyframes bucket-sway/);
+});
+
+test('choosing a helicopter sends its cosmetic selection through the multiplayer room', async () => {
+  const runtime = createRuntime();
+  const socket = await connectHost(runtime);
+
+  await runtime.document.querySelector('#helicopter-skycrane').trigger('click');
+  assert.deepEqual(socket.sent.at(-1), {
+    type: 'setHelicopter',
+    helicopterType: 'skycrane',
+  });
+
+  const room = roomFor(runtime);
+  room.players[0].helicopterType = 'skycrane';
+  socket.receive({ type: 'state', room });
+  assert.match(runtime.document.app.innerHTML, /data-helicopter="skycrane" class="helicopter-choice selected-helicopter"/);
+  assert.match(runtime.document.app.innerHTML, /class="player-helicopter">Skycrane/);
 });
 
 test('a connected host can reopen the mission screen and choose a synchronized new mode', async () => {

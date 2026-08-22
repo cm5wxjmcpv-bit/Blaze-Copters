@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DIFFICULTIES } from '../src/game/config.js';
+import { DEFAULT_HELICOPTER_TYPE, DIFFICULTIES } from '../src/game/config.js';
 import {
   GAME_MODES,
   SNAPSHOT_VERSION,
@@ -123,6 +123,43 @@ test('duplicate helicopter colors are rejected', async () => {
   assert.equal((await game.getRoom()).players.find((player) => player.id === 'guest-0').colorId, 'blue');
 });
 
+test('multiplayer players receive a cosmetic helicopter by default and may share the same aircraft type', async () => {
+  const { game, host, guests } = await createFixture();
+  assert.ok((await game.getRoom()).players.every((player) => player.helicopterType === DEFAULT_HELICOPTER_TYPE));
+
+  await game.webSocketMessage(host, JSON.stringify({ type: 'setHelicopter', helicopterType: 'kamov' }));
+  await game.webSocketMessage(guests[0], JSON.stringify({ type: 'setHelicopter', helicopterType: 'kamov' }));
+
+  const room = await game.getRoom();
+  assert.deepEqual(room.players.map((player) => player.helicopterType), ['kamov', 'kamov']);
+  assert.equal(room.players[0].colorId, 'red');
+  assert.equal(room.players[1].colorId, 'blue');
+  assert.equal(host.sent.at(-1).room.players[1].helicopterType, 'kamov');
+});
+
+test('invalid cosmetic helicopters are rejected without changing the player selection', async () => {
+  const { game, host } = await createFixture();
+  await game.webSocketMessage(host, JSON.stringify({ type: 'setHelicopter', helicopterType: 'chinook' }));
+  await game.webSocketMessage(host, JSON.stringify({ type: 'setHelicopter', helicopterType: '<unknown>' }));
+
+  assert.equal((await game.getRoom()).players[0].helicopterType, 'chinook');
+});
+
+test('reconnecting teammates retain their selected helicopter style and their player color', async () => {
+  const { game, host, guests, connect } = await createFixture();
+  await game.webSocketMessage(guests[0], JSON.stringify({ type: 'setHelicopter', helicopterType: 'skycrane' }));
+  await game.webSocketMessage(host, JSON.stringify({ type: 'start' }));
+  await game.webSocketClose(guests[0]);
+
+  const replacement = await connect('guest-0', 'Guest returned');
+  assert.equal(replacement.response.status, 101);
+  const guest = (await game.getRoom()).players.find((player) => player.id === 'guest-0');
+  assert.equal(guest.helicopterType, 'skycrane');
+  assert.equal(guest.colorId, 'blue');
+  assert.equal(replacement.socket.sent.find((message) => message.type === 'state').room.players
+    .find((player) => player.id === 'guest-0').helicopterType, 'skycrane');
+});
+
 test('only the current host can start a room after all players select colors', async () => {
   const { game, host, guests } = await createFixture();
   await game.webSocketMessage(guests[0], JSON.stringify({ type: 'start' }));
@@ -141,17 +178,19 @@ test('host privileges move to a connected teammate after the current host discon
   assert.equal(room.players.find((player) => player.id === 'guest-0').isHost, true);
 });
 
-test('difficulty, mode, level, and color settings cannot change during a round', async () => {
+test('difficulty, mode, level, helicopter, and color settings cannot change during a round', async () => {
   const { game, host } = await createFixture({ start: true });
   await game.webSocketMessage(host, JSON.stringify({ type: 'setDifficulty', difficulty: 'wildfire' }));
   await game.webSocketMessage(host, JSON.stringify({ type: 'setMode', mode: 'classic' }));
   await game.webSocketMessage(host, JSON.stringify({ type: 'setLevel', level: 'starter' }));
   await game.webSocketMessage(host, JSON.stringify({ type: 'setColor', colorId: 'green' }));
+  await game.webSocketMessage(host, JSON.stringify({ type: 'setHelicopter', helicopterType: 'chinook' }));
   const room = await game.getRoom();
   assert.equal(room.difficulty, 'normal');
   assert.equal(room.mode, 'classic');
   assert.equal(room.level, 'starter');
   assert.equal(room.players.find((player) => player.id === 'host-id').colorId, 'red');
+  assert.equal(room.players.find((player) => player.id === 'host-id').helicopterType, DEFAULT_HELICOPTER_TYPE);
 });
 
 test('invalid game modes and levels are rejected before starting', async () => {
@@ -239,6 +278,28 @@ test('the Worker clamps unsafe snapshot values and shares normalized map sizes',
   assert.deepEqual(snapshot.map, { waterRadius: .35, helipadRadius: .015 });
   assert.equal(snapshot.helicopters[0].water, 1000);
   assert.equal(snapshot.helicopters[0].capacity, 1000);
+  assert.equal(snapshot.helicopters[0].helicopterType, DEFAULT_HELICOPTER_TYPE);
+});
+
+test('multiplayer snapshots use authoritative player helicopter selections instead of host-supplied cosmetics', async () => {
+  const { game, host, guests } = await createFixture();
+  await game.webSocketMessage(host, JSON.stringify({ type: 'setHelicopter', helicopterType: 'chinook' }));
+  await game.webSocketMessage(guests[0], JSON.stringify({ type: 'setHelicopter', helicopterType: 'kamov' }));
+  await game.webSocketMessage(host, JSON.stringify({ type: 'start' }));
+  const room = await game.getRoom();
+
+  await game.webSocketMessage(host, JSON.stringify({
+    type: 'matchSnapshot',
+    snapshot: makeSnapshot(room, {
+      helicopters: [
+        { id: 'host-id', helicopterType: 'skycrane', x: .4, y: .5 },
+        { id: 'guest-0', helicopterType: 'firehawk', x: .6, y: .5 },
+      ],
+    }),
+  }));
+
+  const shared = guests[0].sent.findLast((message) => message.type === 'matchSnapshot').snapshot;
+  assert.deepEqual(shared.helicopters.map((heli) => heli.helicopterType), ['chinook', 'kamov']);
 });
 
 test('a reconnect receives the latest saved match snapshot immediately', async () => {

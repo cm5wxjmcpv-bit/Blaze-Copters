@@ -1,4 +1,4 @@
-import { HELICOPTER_COLORS } from './config.js';
+import { DEFAULT_HELICOPTER_TYPE, HELICOPTER_COLORS, isValidHelicopterType } from './config.js';
 import { DEFAULT_LEVEL_ID, DEFAULT_MODE_ID, defaultLevelForMode, isValidLevel, isValidMode } from './modes.js';
 
 export function createRoom({
@@ -21,7 +21,14 @@ export function createRoom({
     level: selectedLevel,
     round: 1,
     roundEndsAt: null,
-    players: [{ id: hostId, name: hostName, colorId: null, connected: true, isHost: true }],
+    players: [{
+      id: hostId,
+      name: hostName,
+      colorId: null,
+      helicopterType: DEFAULT_HELICOPTER_TYPE,
+      connected: true,
+      isHost: true,
+    }],
     upgrades: { tank: 0, speed: 0, power: 0 },
     selectedUpgrade: null,
   };
@@ -39,7 +46,14 @@ export function addPlayer(room, { id, name }) {
     throw new Error('Room is full');
   }
 
-  room.players.push({ id, name: name || `Player ${room.players.length + 1}`, colorId: null, connected: true, isHost: false });
+  room.players.push({
+    id,
+    name: name || `Player ${room.players.length + 1}`,
+    colorId: null,
+    helicopterType: DEFAULT_HELICOPTER_TYPE,
+    connected: true,
+    isHost: false,
+  });
   return room;
 }
 
@@ -52,6 +66,14 @@ export function chooseColor(room, playerId, colorId) {
   const player = room.players.find((item) => item.id === playerId);
   if (!player) throw new Error('Player not found');
   player.colorId = colorId;
+  return room;
+}
+
+export function chooseHelicopter(room, playerId, helicopterType) {
+  if (!isValidHelicopterType(helicopterType)) throw new Error('Unknown helicopter');
+  const player = room.players.find((item) => item.id === playerId);
+  if (!player) throw new Error('Player not found');
+  player.helicopterType = helicopterType;
   return room;
 }
 

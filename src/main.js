@@ -1,7 +1,8 @@
-import { DIFFICULTIES, HELICOPTER_COLORS } from './game/config.js';
+import { DEFAULT_HELICOPTER_TYPE, DIFFICULTIES, HELICOPTER_COLORS, HELICOPTER_TYPES } from './game/config.js';
 import { GAME_MODES, defaultLevelForMode, levelsForMode, nextLevelForMode, playableModes } from './game/modes.js';
 import { BlazeSimulation } from './game/simulation.js';
 import { attachJoystick } from './ui/joystick.js';
+import { helicopterPreviewMarkup } from './ui/helicopters.js';
 import { drawSimulation } from './ui/render.js';
 
 const app = document.querySelector('#app');
@@ -477,6 +478,10 @@ function lobbyScreen() {
     availableModes.unshift(GAME_MODES[room.mode]);
   }
   const availableLevels = levelsForMode(room.mode);
+  const selectedHelicopter = HELICOPTER_TYPES.some((type) => type.id === me.helicopterType)
+    ? me.helicopterType
+    : DEFAULT_HELICOPTER_TYPE;
+  const selectedColor = HELICOPTER_COLORS.find((color) => color.id === me.colorId)?.value || null;
 
   app.innerHTML = `
     <section class="screen">
@@ -508,6 +513,20 @@ function lobbyScreen() {
 
         <div>
           <strong>Choose your helicopter</strong>
+          <div class="helicopter-options" style="margin-top:10px">
+            ${HELICOPTER_TYPES.map((type) => `
+              <button id="helicopter-${type.id}" data-helicopter="${type.id}" class="helicopter-choice ${selectedHelicopter === type.id ? 'selected-helicopter' : ''}"
+                aria-label="${escapeHtml(type.label)}: ${escapeHtml(type.description)}" aria-pressed="${selectedHelicopter === type.id}">
+                ${helicopterPreviewMarkup(type.id, selectedColor || type.previewColor)}
+                <span class="helicopter-name">${escapeHtml(type.label)}</span>
+              </button>
+            `).join('')}
+          </div>
+          <p class="appearance-note">Every helicopter flies and fights fire the same.</p>
+        </div>
+
+        <div>
+          <strong>Choose your color</strong>
           <div class="colors" style="margin-top:10px">
             ${HELICOPTER_COLORS.map((color) => `<button aria-label="${escapeHtml(color.label)}" data-color="${color.id}" class="color-button ${me.colorId === color.id ? 'selected' : ''} ${takenColors.has(color.id) ? 'taken' : ''}" style="background:${color.value}" ${takenColors.has(color.id) ? 'disabled' : ''}></button>`).join('')}
           </div>
@@ -518,7 +537,9 @@ function lobbyScreen() {
           <div class="players" style="margin-top:10px">
             ${activePlayers.map((player) => {
               const color = HELICOPTER_COLORS.find((item) => item.id === player.colorId);
-              return `<div class="player-chip"><span class="swatch" style="background:${color?.value || 'transparent'};border:1px solid rgba(255,255,255,.3)"></span><span>${escapeHtml(player.name)}${player.isHost ? ' ★' : ''}</span></div>`;
+              const helicopter = HELICOPTER_TYPES.find((type) => type.id === player.helicopterType)
+                || HELICOPTER_TYPES.find((type) => type.id === DEFAULT_HELICOPTER_TYPE);
+              return `<div class="player-chip"><span class="swatch" style="background:${color?.value || 'transparent'};border:1px solid rgba(255,255,255,.3)"></span><span class="player-details"><span>${escapeHtml(player.name)}${player.isHost ? ' ★' : ''}</span><span class="player-helicopter">${escapeHtml(helicopter.label)}</span></span></div>`;
             }).join('')}
           </div>
         </div>
@@ -532,6 +553,11 @@ function lobbyScreen() {
 
   document.querySelectorAll('[data-color]').forEach((button) => {
     button.addEventListener('click', () => sendRoomMessage('setColor', { colorId: button.dataset.color }));
+  });
+  document.querySelectorAll('[data-helicopter]').forEach((button) => {
+    button.addEventListener('click', () => sendRoomMessage('setHelicopter', {
+      helicopterType: button.dataset.helicopter,
+    }));
   });
   document.querySelector('#difficulty')?.addEventListener('change', (event) => {
     sendRoomMessage('setDifficulty', { difficulty: event.target.value });
