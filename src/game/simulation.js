@@ -24,16 +24,31 @@ export class BlazeSimulation {
       power: Math.max(0, Number(upgrades.power) || 0),
     };
 
-    this.water = { x: width * .12, y: height * .74, radius: Math.max(52, Math.min(width, height) * .075) };
+    // Starting map: one compact, readable single-screen training area.
+    // Larger scrolling maps will be added later as co-op levels.
+    this.water = {
+      x: width * .14,
+      y: height * .68,
+      radius: Math.max(56, Math.min(width, height) * .09),
+    };
+    this.fireStation = { x: width * .22, y: height * .24 };
+    this.helipad = {
+      x: width * .31,
+      y: height * .24,
+      radius: Math.max(24, Math.min(width, height) * .04),
+    };
     this.cabins = [
-      { x: width * .76, y: height * .22 },
-      { x: width * .82, y: height * .69 },
+      { x: width * .72, y: height * .20 },
+      { x: width * .83, y: height * .24 },
+      { x: width * .75, y: height * .34 },
+      { x: width * .87, y: height * .37 },
     ];
-    this.trees = Array.from({ length: 42 }, (_, i) => ({
-      x: 50 + ((i * 83) % Math.max(100, width - 100)),
-      y: 70 + ((i * 137) % Math.max(100, height - 140)),
-      alive: true,
-    }));
+    this.campground = [
+      { x: width * .69, y: height * .72 },
+      { x: width * .79, y: height * .77 },
+      { x: width * .86, y: height * .68 },
+    ];
+    this.trees = this.buildTrees();
     this.fires = [];
     this.burned = [];
     this.helicopters = players.map((player, i) => this.createHelicopter(player, i));
@@ -45,14 +60,43 @@ export class BlazeSimulation {
     }
   }
 
+  buildTrees() {
+    const clusters = [
+      { x: .09, y: .14, rx: .10, ry: .12, count: 11 },
+      { x: .49, y: .12, rx: .14, ry: .08, count: 10 },
+      { x: .08, y: .43, rx: .08, ry: .11, count: 8 },
+      { x: .46, y: .84, rx: .18, ry: .08, count: 13 },
+      { x: .94, y: .55, rx: .07, ry: .13, count: 10 },
+    ];
+    const trees = [];
+
+    for (const cluster of clusters) {
+      for (let i = 0; i < cluster.count; i += 1) {
+        const angle = i * 2.399963229728653;
+        const ring = .28 + ((i * 37) % 71) / 100;
+        const x = clamp((cluster.x + Math.cos(angle) * cluster.rx * ring) * this.width, 18, this.width - 18);
+        const y = clamp((cluster.y + Math.sin(angle) * cluster.ry * ring) * this.height, 18, this.height - 18);
+        trees.push({ x, y, alive: true });
+      }
+    }
+
+    return trees;
+  }
+
   createHelicopter(player, index = 0) {
     const capacity = 100 * (1 + this.upgrades.tank * .2);
+    const spawnOffsets = [
+      { x: -22, y: -18 }, { x: 22, y: -18 },
+      { x: -22, y: 18 }, { x: 22, y: 18 },
+      { x: 0, y: -36 }, { x: 0, y: 36 },
+    ];
+    const offset = spawnOffsets[index % spawnOffsets.length];
     return {
       id: player.id,
       name: player.name,
       color: HELICOPTER_COLORS.find((c) => c.id === player.colorId)?.value || '#fff',
-      x: this.width * .2 + (index % 3) * 55,
-      y: this.height * .22 + Math.floor(index / 3) * 55,
+      x: this.helipad.x + offset.x,
+      y: this.helipad.y + offset.y,
       vx: 0,
       vy: 0,
       water: capacity,
@@ -81,11 +125,17 @@ export class BlazeSimulation {
   resize(width, height) {
     const sx = width / this.width;
     const sy = height / this.height;
-    for (const list of [this.helicopters, this.fires, this.burned, this.trees, this.cabins]) {
+    for (const list of [this.helicopters, this.fires, this.burned, this.trees, this.cabins, this.campground]) {
       for (const item of list) { item.x *= sx; item.y *= sy; }
     }
-    this.water.x *= sx; this.water.y *= sy;
-    this.width = width; this.height = height;
+    for (const item of [this.water, this.fireStation, this.helipad]) {
+      item.x *= sx;
+      item.y *= sy;
+    }
+    this.water.radius *= Math.min(sx, sy);
+    this.helipad.radius *= Math.min(sx, sy);
+    this.width = width;
+    this.height = height;
   }
 
   setInput(playerId, x, y) {
@@ -117,6 +167,7 @@ export class BlazeSimulation {
         : minY + Math.random() * Math.max(1, maxY - minY);
 
       if (distance({ x: fx, y: fy }, this.water) < this.water.radius * 1.5) continue;
+      if (!suppliedPosition && distance({ x: fx, y: fy }, this.helipad) < this.helipad.radius * 2.2) continue;
 
       this.fires.push({ x: fx, y: fy, hp: 100, radius: 22 + Math.random() * 8, born: performance.now() });
       return true;
