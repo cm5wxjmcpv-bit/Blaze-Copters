@@ -49,6 +49,25 @@ function advance(sim, seconds, { clearFires = false } = {}) {
   }
 }
 
+function distanceToRoute(point, route) {
+  let nearest = Number.POSITIVE_INFINITY;
+
+  for (let index = 1; index < route.length; index += 1) {
+    const start = route[index - 1];
+    const end = route[index];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const lengthSquared = dx * dx + dy * dy;
+    const progress = lengthSquared
+      ? Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared))
+      : 0;
+    const closest = { x: start.x + dx * progress, y: start.y + dy * progress };
+    nearest = Math.min(nearest, Math.hypot(point.x - closest.x, point.y - closest.y));
+  }
+
+  return nearest;
+}
+
 test('the shared mode registry exposes Classic Co-op and its starter level', () => {
   assert.equal(GAME_MODES[DEFAULT_MODE_ID].label, 'Classic Co-op');
   assert.equal(defaultLevelForMode(DEFAULT_MODE_ID), DEFAULT_LEVEL_ID);
@@ -360,6 +379,84 @@ test('wildfire survival fails only after sustained overwhelming fire danger', ()
   assert.equal(sim.state.danger, 100);
 });
 
+test('protection missions start every fire away from buildings, roads, and vehicles on all screen sizes', () => {
+  const modes = ['protect-town', 'evacuation', 'convoy-protection'];
+  const screens = [
+    { width: 1000, height: 600 },
+    { width: 390, height: 844 },
+    { width: 844, height: 390 },
+    { width: 320, height: 240 },
+  ];
+
+  for (const mode of modes) {
+    for (const screen of screens) {
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const sim = modeSimulation(mode, screen);
+        assert.ok(sim.fires.length > 0, `${mode} did not initialize fires on ${screen.width}x${screen.height}`);
+
+        for (const fire of sim.fires) {
+          assert.equal(
+            sim.isProtectedIgnition(fire),
+            false,
+            `${mode} started a fire on its protected objective on ${screen.width}x${screen.height}`,
+          );
+        }
+      }
+    }
+  }
+});
+
+test('random fire ignitions reject protected buildings, evacuation roads, and convoy vehicles', () => {
+  const town = modeSimulation('protect-town');
+  const building = town.state.buildings[2];
+  assert.equal(town.spawnFire(building.x, building.y), false);
+
+  const evacuation = modeSimulation('evacuation');
+  const roadPoint = evacuation.route[2];
+  assert.equal(evacuation.spawnFire(roadPoint.x, roadPoint.y), false);
+
+  const convoy = modeSimulation('convoy-protection');
+  for (const vehicle of convoy.state.convoyVehicles) {
+    assert.equal(convoy.spawnFire(vehicle.x, vehicle.y), false);
+  }
+});
+
+test('existing fire fronts spread progressively toward each protected objective', (context) => {
+  context.mock.method(Math, 'random', () => .5);
+
+  for (const mode of ['protect-town', 'evacuation', 'convoy-protection']) {
+    const sim = modeSimulation(mode);
+    sim.fires = [];
+    const clearance = sim.objectiveIgnitionClearance();
+
+    let source;
+    let distanceToObjective;
+    if (mode === 'protect-town') {
+      const building = sim.state.buildings[2];
+      source = { x: building.x - clearance - 28, y: building.y };
+      distanceToObjective = (fire) => Math.hypot(fire.x - building.x, fire.y - building.y);
+    } else if (mode === 'evacuation') {
+      const roadPoint = sim.route[3];
+      source = { x: roadPoint.x, y: roadPoint.y - clearance - 28 };
+      distanceToObjective = (fire) => distanceToRoute(fire, sim.route);
+    } else {
+      const lead = sim.state.convoyVehicles[0];
+      source = { x: sim.width * .72, y: lead.y - clearance - 28 };
+      distanceToObjective = (fire) => Math.hypot(fire.x - lead.x, fire.y - lead.y);
+    }
+
+    assert.equal(sim.spawnFire(source.x, source.y), true, `${mode} could not start its distant wildfire`);
+    const previous = sim.fires[0];
+    sim.modeController.spread(sim);
+
+    assert.equal(sim.fires.length, 2, `${mode} did not spread its existing fire`);
+    const next = sim.fires[1];
+    assert.ok(Math.hypot(next.x - previous.x, next.y - previous.y) <= 128, `${mode} created an unrelated fire`);
+    assert.ok(distanceToObjective(next) < distanceToObjective(previous), `${mode} did not spread toward its objective`);
+    assert.equal(sim.isProtectedIgnition(next), true, `${mode} never allowed the existing front to approach its objective`);
+  }
+});
+
 test('protect the town starts with resilient synchronized buildings and can be won', () => {
   const sim = modeSimulation('protect-town');
   assert.equal(sim.state.buildings.length, 7);
@@ -442,6 +539,21 @@ test('evacuation vehicles stop for road fires and resume after the team clears t
   assert.ok(vehicle.progress > before);
 });
 
+test('evacuation starts replacement fires beside the road before spreading them onto the route', (context) => {
+  context.mock.method(Math, 'random', () => .5);
+  const sim = modeSimulation('evacuation');
+  sim.fires = [];
+
+  sim.modeController.spread(sim);
+  assert.equal(sim.fires.length, 1);
+  assert.equal(sim.isProtectedIgnition(sim.fires[0]), false);
+  const roadside = sim.fires[0];
+
+  sim.modeController.spread(sim);
+  assert.equal(sim.fires.length, 2);
+  assert.ok(distanceToRoute(sim.fires[1], sim.route) < distanceToRoute(roadside, sim.route));
+});
+
 test('evacuation is won once the required number of vehicles reach safety', () => {
   const sim = modeSimulation('evacuation');
   sim.fires = [];
@@ -494,6 +606,24 @@ test('convoy fires stop the vehicles and damage their integrity before ending th
   sim.tick(sim.lastTick + 50);
   assert.equal(sim.complete, true);
   assert.equal(sim.state.outcome, 'lost');
+});
+
+test('advanced convoy ember warnings and ignitions remain beside the protected road', (context) => {
+  context.mock.method(Math, 'random', () => .5);
+  const sim = modeSimulation('convoy-protection');
+  sim.fires = [];
+  sim.lastSpread = Number.POSITIVE_INFINITY;
+  sim.state.distanceMeters = 2500;
+  sim.state.warningCooldown = 0;
+
+  sim.tick(sim.lastTick + 50);
+  assert.equal(sim.state.warnings.length, 1);
+  assert.equal(sim.isProtectedIgnition(sim.state.warnings[0]), false);
+
+  advance(sim, 2.2);
+  const spot = sim.fires.find((fire) => fire.kind === 'spot');
+  assert.ok(spot, 'the off-road ember did not become a fire');
+  assert.equal(sim.isProtectedIgnition(spot), false);
 });
 
 test('mission objects and moving chunks resize safely with screen rotation', () => {

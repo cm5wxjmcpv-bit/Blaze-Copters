@@ -18,6 +18,23 @@ import { scaleForPlayers } from './scaling.js';
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
+function distanceToSegment(point, start, end) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (!lengthSquared) return distance(point, start);
+
+  const progress = clamp(
+    ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared,
+    0,
+    1,
+  );
+  return distance(point, {
+    x: start.x + dx * progress,
+    y: start.y + dy * progress,
+  });
+}
+
 export class BlazeSimulation {
   constructor({
     width,
@@ -212,7 +229,36 @@ export class BlazeSimulation {
     heli.vy = y * scale;
   }
 
-  spawnFire(x, y, { hp = 100, kind = 'wildfire' } = {}) {
+  objectiveIgnitionClearance() {
+    return Math.max(58, Math.min(96, Math.min(this.width, this.height) * .16));
+  }
+
+  isProtectedIgnition(position) {
+    const clearance = this.objectiveIgnitionClearance();
+    const protectedActors = this.mode === 'protect-town'
+      ? this.state.buildings
+      : this.mode === 'evacuation'
+        ? this.state.units
+        : this.mode === 'convoy-protection'
+          ? this.state.convoyVehicles
+          : [];
+
+    if (protectedActors.some((actor) => actor.hp > 0 && distance(position, actor) < clearance)) {
+      return true;
+    }
+
+    if (this.mode !== 'evacuation' && this.mode !== 'convoy-protection') return false;
+
+    for (let index = 1; index < this.route.length; index += 1) {
+      if (distanceToSegment(position, this.route[index - 1], this.route[index]) < clearance) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  spawnFire(x, y, { hp = 100, kind = 'wildfire', spreading = false } = {}) {
     if (this.fires.length >= this.scaling.maxFires) return false;
 
     const margin = Math.min(80, Math.max(24, Math.min(this.width, this.height) * .16));
@@ -233,6 +279,7 @@ export class BlazeSimulation {
 
       if (distance({ x: fx, y: fy }, this.water) < this.water.radius * 1.5) continue;
       if (!suppliedPosition && distance({ x: fx, y: fy }, this.helipad) < this.helipad.radius * 2.2) continue;
+      if (!spreading && this.isProtectedIgnition({ x: fx, y: fy })) continue;
 
       this.fires.push({
         x: fx,
