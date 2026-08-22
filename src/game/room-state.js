@@ -1,5 +1,5 @@
 import { HELICOPTER_COLORS } from './config.js';
-import { DEFAULT_LEVEL_ID, DEFAULT_MODE_ID, isValidLevel, isValidMode } from './modes.js';
+import { DEFAULT_LEVEL_ID, DEFAULT_MODE_ID, defaultLevelForMode, isValidLevel, isValidMode } from './modes.js';
 
 export function createRoom({
   roomCode,
@@ -10,7 +10,7 @@ export function createRoom({
   level = DEFAULT_LEVEL_ID,
 }) {
   const selectedMode = isValidMode(mode) ? mode : DEFAULT_MODE_ID;
-  const selectedLevel = isValidLevel(selectedMode, level) ? level : DEFAULT_LEVEL_ID;
+  const selectedLevel = isValidLevel(selectedMode, level) ? level : defaultLevelForMode(selectedMode);
 
   return {
     roomCode,

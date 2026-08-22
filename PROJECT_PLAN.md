@@ -22,6 +22,12 @@
 - The selected game mode and level must remain shared and validated for every player.
 - New players join in the lobby; existing players can reconnect during an active round.
 - Cloudflare owns room permissions, round deadlines, room cleanup, and validated match snapshots.
+- Endless Wildfire Survival and Convoy Protection have no artificial round deadline.
+- Timed cooperative missions include Protect the Town, Spot Fire, and Evacuation.
+- A single shared engine powers every mission; mode controllers only own their objectives and rules.
+- Buildings, ember warnings, evacuation traffic, convoy vehicles, and moving-map chunks are authoritative shared state.
+- Convoy terrain loads ahead and unloads behind the team instead of creating an unbounded world.
+- Every short-form mission starts with one expandable level; additional maps are designed separately.
 - Final graphics will be simple, colorful sprite-sheet animation.
 
 ## Milestones
@@ -31,7 +37,7 @@
 3. Real 1-6 player synchronization.
 4. Recoverable shared match state, authenticated reconnects, and cloud-owned round deadlines.
 5. Shared team upgrades and round progression.
-6. Additional cooperative game modes, mission maps, and level progression.
+6. Five cooperative game modes, starter mission maps, endless convoy streaming, and expandable level progression.
 7. Versus mode, with stronger server-side simulation authority before competitive play.
 8. Sprite art, animation, sound, polish.
 9. Mobile browser testing, screen scaling, and reconnect handling.

@@ -1,5 +1,5 @@
 import { DIFFICULTIES, HELICOPTER_COLORS } from './game/config.js';
-import { GAME_MODES, levelsForMode } from './game/modes.js';
+import { GAME_MODES, defaultLevelForMode, levelsForMode, nextLevelForMode, playableModes } from './game/modes.js';
 import { BlazeSimulation } from './game/simulation.js';
 import { attachJoystick } from './ui/joystick.js';
 import { drawSimulation } from './ui/render.js';
@@ -31,6 +31,7 @@ const session = {
   connectionGeneration: 0,
   reconnectAttempts: 0,
   reconnectTimer: null,
+  modeMenuAfterLobby: false,
 };
 
 const escapeHtml = (value) => String(value ?? '')
@@ -123,11 +124,17 @@ async function roomPreview(code) {
   return data.room || null;
 }
 
-async function createOnlineRoom(name) {
+async function createOnlineRoom(name, mode = null) {
+  const selection = mode ? { mode, level: defaultLevelForMode(mode) } : {};
   const response = await fetch('/api/rooms', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ hostId: session.playerId, hostName: name, sessionToken: session.sessionToken }),
+    body: JSON.stringify({
+      hostId: session.playerId,
+      hostName: name,
+      sessionToken: session.sessionToken,
+      ...selection,
+    }),
   });
   if (!response.ok) throw new Error('Could not create a room.');
   const data = await response.json();
@@ -177,7 +184,14 @@ function applyRoomState(room) {
     return;
   }
 
-  if (room.phase === 'lobby') lobbyScreen();
+  if (room.phase === 'lobby') {
+    if (session.modeMenuAfterLobby && room.hostId === session.playerId) {
+      session.modeMenuAfterLobby = false;
+      modeSelectionScreen({ name: session.playerName, existingRoom: true });
+    } else {
+      lobbyScreen();
+    }
+  }
 }
 
 function scheduleReconnect(code, name) {
@@ -306,6 +320,7 @@ function leaveRoom() {
   setTimeout(() => socket?.close(), 80);
   session.room = null;
   session.sim = null;
+  session.modeMenuAfterLobby = false;
   clearSavedRoom();
   setRoomQuery('');
   homeScreen();
@@ -325,7 +340,7 @@ function homeScreen(message = '') {
           <p class="subtitle">Co-op wildfire helicopter mini game</p>
         </div>
         <label>Player name
-          <input id="player-name" maxlength="18" placeholder="Player 1" value="Player 1" />
+          <input id="player-name" maxlength="18" placeholder="Player 1" value="${escapeHtml(session.playerName || 'Player 1')}" />
         </label>
         <button id="create-game">Create Game</button>
         <div class="row">
@@ -347,20 +362,10 @@ function homeScreen(message = '') {
     joinButton.disabled = codeInput.value.length !== 4;
   });
 
-  createButton.addEventListener('click', async () => {
+  createButton.addEventListener('click', () => {
     const name = nameInput.value.trim() || 'Player 1';
-    createButton.disabled = true;
-    joinButton.disabled = true;
-    status.textContent = 'Creating online room…';
-    try {
-      const code = await createOnlineRoom(name);
-      setRoomQuery(code);
-      await connectToRoom(code, name);
-    } catch (error) {
-      createButton.disabled = false;
-      joinButton.disabled = codeInput.value.length !== 4;
-      status.textContent = error.message || 'Could not create room.';
-    }
+    session.playerName = name;
+    modeSelectionScreen({ name });
   });
 
   joinButton.addEventListener('click', async () => {
@@ -385,6 +390,68 @@ function homeScreen(message = '') {
   });
 }
 
+function modeSelectionScreen({ name = session.playerName || 'Player 1', existingRoom = false } = {}) {
+  cleanupGameView();
+  session.view = 'mode-select';
+  const choices = playableModes();
+
+  app.innerHTML = `
+    <section class="screen mode-screen">
+      <div class="card mode-card stack">
+        <div>
+          <h1 class="mode-title">Choose a Game Mode</h1>
+          <p class="subtitle">Same simple helicopter controls. Five different team missions.</p>
+        </div>
+        <div class="mode-grid">
+          ${choices.map((mode) => `
+            <article class="mission-card ${existingRoom && session.room?.mode === mode.id ? 'selected-mission' : ''}">
+              <div class="mission-heading">
+                <h2>${escapeHtml(mode.label)}</h2>
+                <span class="mission-tag">${mode.endless ? 'ENDLESS' : 'MISSION'}</span>
+              </div>
+              <p>${escapeHtml(mode.description)}</p>
+              <button id="play-mode-${mode.id}" data-mode="${mode.id}">Play</button>
+            </article>
+          `).join('')}
+        </div>
+        <div id="mode-status" class="notice small">${existingRoom
+          ? 'The host picks the next mission for everyone in the room.'
+          : 'Choose a mission, then invite your team with the room code.'}</div>
+        <button class="secondary" id="mode-back">${existingRoom ? 'Back to Lobby' : 'Main Menu'}</button>
+      </div>
+    </section>`;
+
+  document.querySelectorAll('[data-mode]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const mode = button.dataset.mode;
+      if (!GAME_MODES[mode]?.selectable) return;
+
+      if (existingRoom) {
+        sendRoomMessage('setMode', { mode });
+        return;
+      }
+
+      document.querySelectorAll('[data-mode]').forEach((choice) => { choice.disabled = true; });
+      const status = document.querySelector('#mode-status');
+      if (status) status.textContent = `Creating ${GAME_MODES[mode].label} room…`;
+
+      try {
+        const code = await createOnlineRoom(name, mode);
+        setRoomQuery(code);
+        await connectToRoom(code, name);
+      } catch (error) {
+        document.querySelectorAll('[data-mode]').forEach((choice) => { choice.disabled = false; });
+        if (status) status.textContent = error.message || 'Could not create room.';
+      }
+    });
+  });
+
+  document.querySelector('#mode-back')?.addEventListener('click', () => {
+    if (existingRoom) lobbyScreen();
+    else homeScreen();
+  });
+}
+
 function lobbyScreen() {
   cleanupGameView();
   session.view = 'lobby';
@@ -405,7 +472,10 @@ function lobbyScreen() {
   const joinUrl = `${location.origin}${location.pathname}?room=${room.roomCode}`;
   const canStart = me.isHost && activePlayers.length >= 1 && activePlayers.every((player) => player.colorId);
   const upgrades = roomUpgrades(room);
-  const availableModes = Object.values(GAME_MODES);
+  const availableModes = playableModes();
+  if (GAME_MODES[room.mode] && !GAME_MODES[room.mode].selectable) {
+    availableModes.unshift(GAME_MODES[room.mode]);
+  }
   const availableLevels = levelsForMode(room.mode);
 
   app.innerHTML = `
@@ -415,6 +485,7 @@ function lobbyScreen() {
         <div class="room-code">${escapeHtml(room.roomCode)}</div>
         <div class="join-url">${escapeHtml(joinUrl)}</div>
         <div class="notice small">Shared multiplayer match connected. Fires, water, helicopter positions, and the round timer are synchronized for the room.</div>
+        <div class="notice small">${escapeHtml(GAME_MODES[room.mode]?.description || '')}</div>
 
         <div class="settings-grid">
           <label>Game mode
@@ -454,6 +525,7 @@ function lobbyScreen() {
 
         ${room.round > 1 ? `<div class="notice small">Team upgrades — Water ${upgrades.tank} · Speed ${upgrades.speed} · Effectiveness ${upgrades.power}</div>` : ''}
         ${me.isHost ? `<button id="start-game" ${canStart ? '' : 'disabled'}>Start Mission</button>` : '<div class="notice">Waiting for host to start…</div>'}
+        ${me.isHost ? '<button class="secondary" id="choose-game-mode">Game Modes</button>' : ''}
         <button class="secondary" id="leave-game">Leave</button>
       </div>
     </section>`;
@@ -471,6 +543,9 @@ function lobbyScreen() {
     sendRoomMessage('setLevel', { level: event.target.value });
   });
   document.querySelector('#start-game')?.addEventListener('click', () => sendRoomMessage('start'));
+  document.querySelector('#choose-game-mode')?.addEventListener('click', () => {
+    modeSelectionScreen({ name: session.playerName, existingRoom: true });
+  });
   document.querySelector('#leave-game').addEventListener('click', leaveRoom);
 }
 
@@ -496,6 +571,57 @@ function paintWaterHud(hud, percent) {
   }
 }
 
+function formatClock(value) {
+  const seconds = Math.max(0, Math.ceil(Number(value) || 0));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function updateMissionHud(sim, room) {
+  const roundHud = document.querySelector('#round-hud');
+  const fireHud = document.querySelector('#fire-hud');
+  const objectiveHud = document.querySelector('#objective-hud');
+  const timeHud = document.querySelector('#time-hud');
+  if (!roundHud || !fireHud || !objectiveHud || !timeHud) return false;
+
+  const state = sim.state;
+  if (sim.mode === 'wildfire-survival') {
+    roundHud.textContent = `Time ${formatClock(state.elapsed)}`;
+    fireHud.textContent = `Fires ${sim.fires.length}`;
+    objectiveHud.textContent = `Danger ${Math.round(state.danger)}%`;
+    timeHud.textContent = `Level ${state.difficultyTier}`;
+  } else if (sim.mode === 'protect-town') {
+    const saved = state.buildings.length - state.buildingsLost;
+    roundHud.textContent = `Town ${saved}/${state.buildings.length}`;
+    fireHud.textContent = `Fires ${sim.fires.length}`;
+    objectiveHud.textContent = `${state.buildings.filter((building) => building.status === 'burning').length} burning`;
+    timeHud.textContent = formatClock(sim.timeLeft);
+  } else if (sim.mode === 'spot-fire') {
+    roundHud.textContent = state.objectivePhase === 'containment' ? 'Contain fires' : 'Ember watch';
+    fireHud.textContent = `Fires ${sim.fires.length}`;
+    objectiveHud.textContent = state.objectivePhase === 'containment'
+      ? `Danger ${Math.round(state.danger)}%`
+      : `Embers ${state.warnings.length}`;
+    timeHud.textContent = formatClock(state.objectivePhase === 'containment' ? sim.timeLeft : state.objectiveSeconds);
+  } else if (sim.mode === 'evacuation') {
+    roundHud.textContent = `Evac ${state.evacuated}/${state.unitsRequired}`;
+    fireHud.textContent = state.routeBlocked ? 'Route blocked' : 'Route open';
+    objectiveHud.textContent = `${Math.max(0, state.unitsRequired - state.evacuated)} remaining`;
+    timeHud.textContent = formatClock(sim.timeLeft);
+  } else if (sim.mode === 'convoy-protection') {
+    roundHud.textContent = `Distance ${(state.distanceMeters / 1609.344).toFixed(2)} mi`;
+    fireHud.textContent = `Convoy ${Math.round(state.convoyIntegrity)}%`;
+    objectiveHud.textContent = state.routeBlocked ? 'Route blocked' : `Fires ${sim.fires.length}`;
+    timeHud.textContent = `Level ${state.difficultyTier}`;
+  } else {
+    roundHud.textContent = `Round ${room.round}`;
+    fireHud.textContent = `Fires ${sim.fires.length}`;
+    objectiveHud.textContent = `${sim.extinguished} out`;
+    timeHud.textContent = formatClock(sim.timeLeft);
+  }
+
+  return true;
+}
+
 function gameScreen() {
   cleanupGameView();
   session.view = 'game';
@@ -509,6 +635,7 @@ function gameScreen() {
         <div class="hud-group">
           <div class="hud-pill" id="round-hud">Round ${room.round}</div>
           <div class="hud-pill" id="fire-hud">Fires 0</div>
+          <div class="hud-pill" id="objective-hud">Ready</div>
         </div>
         <div class="hud-group">
           <div class="hud-pill" id="water-hud">Water 100%</div>
@@ -599,16 +726,10 @@ function gameScreen() {
     drawSimulation(ctx, session.sim);
 
     const mine = session.sim.helicopters.find((helicopter) => helicopter.id === session.playerId);
-    const fireHud = document.querySelector('#fire-hud');
     const waterHud = document.querySelector('#water-hud');
-    const timeHud = document.querySelector('#time-hud');
-    if (!fireHud || !waterHud || !timeHud) return;
+    if (!waterHud || !updateMissionHud(session.sim, session.room)) return;
 
-    fireHud.textContent = `Fires ${session.sim.fires.length}`;
     if (mine) paintWaterHud(waterHud, (mine.water / mine.capacity) * 100);
-
-    const seconds = Math.max(0, Math.ceil(session.sim.timeLeft));
-    timeHud.textContent = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
     if (session.sim.complete) {
       endRoundScreen();
@@ -618,6 +739,49 @@ function gameScreen() {
     requestAnimationFrame(loop);
   };
   requestAnimationFrame(loop);
+}
+
+function roundResultCards(sim) {
+  const state = sim.state;
+  if (sim.mode === 'wildfire-survival') {
+    return [
+      { value: formatClock(state.elapsed), label: 'survival time' },
+      { value: sim.extinguished, label: 'fires extinguished' },
+      { value: Math.round(state.teamWaterDropped), label: 'team water dropped' },
+      { value: state.highestDifficulty, label: 'highest difficulty' },
+    ];
+  }
+  if (sim.mode === 'protect-town') {
+    return [
+      { value: `${state.buildings.length - state.buildingsLost}/${state.buildings.length}`, label: 'buildings saved' },
+      { value: formatClock(state.elapsed), label: 'mission time' },
+      { value: sim.extinguished, label: 'fires extinguished' },
+    ];
+  }
+  if (sim.mode === 'spot-fire') {
+    return [
+      { value: sim.extinguished, label: 'fires extinguished' },
+      { value: formatClock(state.elapsed), label: 'mission time' },
+    ];
+  }
+  if (sim.mode === 'evacuation') {
+    return [
+      { value: `${state.evacuated}/${state.unitsRequired}`, label: 'vehicles evacuated' },
+      { value: state.unitsLost, label: 'vehicles lost' },
+      { value: formatClock(state.elapsed), label: 'mission time' },
+    ];
+  }
+  if (sim.mode === 'convoy-protection') {
+    return [
+      { value: `${(state.distanceMeters / 1609.344).toFixed(2)} mi`, label: 'convoy distance' },
+      { value: sim.extinguished, label: 'fires extinguished' },
+      { value: state.highestDifficulty, label: 'highest difficulty' },
+    ];
+  }
+  return [
+    { value: sim.extinguished, label: 'fires extinguished' },
+    { value: sim.fires.length, label: 'fires still burning' },
+  ];
 }
 
 function endRoundScreen() {
@@ -632,7 +796,19 @@ function endRoundScreen() {
   const choices = sim.upgradeChoices();
   const upgrades = roomUpgrades(room);
   const selectedChoice = choices.find((choice) => choice.id === room.selectedUpgrade);
+  const nextLevel = nextLevelForMode(room.mode, room.level);
   const serverReady = room.phase === 'roundEnd';
+  const canContinue = serverReady && Boolean(room.selectedUpgrade);
+  const resultTitle = sim.mode === 'classic'
+    ? `Round ${room.round} Complete`
+    : sim.state.outcome === 'won'
+      ? 'Mission Complete'
+      : GAME_MODES[sim.mode]?.endless
+        ? 'Run Complete'
+        : 'Mission Ended';
+  const resultCards = roundResultCards(sim)
+    .map((card) => `<div class="notice grow"><strong>${escapeHtml(card.value)}</strong><br><span class="small">${escapeHtml(card.label)}</span></div>`)
+    .join('');
 
   const choiceButtons = choices.map((choice) => {
     const disabled = !me?.isHost || !serverReady || Boolean(room.selectedUpgrade);
@@ -652,17 +828,21 @@ function endRoundScreen() {
   app.innerHTML = `
     <section class="screen">
       <div class="card stack">
-        <h2 style="margin:0">Round ${room.round} Complete</h2>
-        <div class="row">
-          <div class="notice grow"><strong>${sim.extinguished}</strong><br><span class="small">fires extinguished</span></div>
-          <div class="notice grow"><strong>${sim.fires.length}</strong><br><span class="small">fires still burning</span></div>
-        </div>
+        <h2 style="margin:0">${escapeHtml(resultTitle)}</h2>
+        <div class="small">${escapeHtml(GAME_MODES[sim.mode]?.label || 'Classic Co-op')}</div>
+        ${sim.state.reason ? `<div class="notice">${escapeHtml(sim.state.reason)}</div>` : ''}
+        <div class="row">${resultCards}</div>
         <h3 style="margin-bottom:0">Team Upgrade</h3>
         <div class="notice small">${escapeHtml(statusText)}</div>
         <div class="row">${choiceButtons}</div>
-        ${me?.isHost
-          ? `<button class="secondary" id="lobby-button" ${room.selectedUpgrade ? '' : 'disabled'}>Continue</button>`
-          : '<button class="secondary" id="leave-round">Leave Room</button>'}
+        ${me?.isHost ? `
+          <button id="lobby-button" ${canContinue ? '' : 'disabled'}>Play Again</button>
+          ${nextLevel && sim.state.outcome === 'won'
+            ? `<button class="secondary" id="next-level" ${canContinue ? '' : 'disabled'}>Next Level</button>`
+            : ''}
+          <button class="secondary" id="round-game-modes" ${canContinue ? '' : 'disabled'}>Game Modes</button>
+        ` : ''}
+        <button class="secondary" id="leave-round">Main Menu</button>
       </div>
     </section>`;
 
@@ -679,6 +859,13 @@ function endRoundScreen() {
 
   document.querySelector('#lobby-button')?.addEventListener('click', () => {
     sendRoomMessage('returnLobby');
+  });
+  document.querySelector('#next-level')?.addEventListener('click', () => {
+    if (nextLevel) sendRoomMessage('returnLobby', { level: nextLevel.id });
+  });
+  document.querySelector('#round-game-modes')?.addEventListener('click', () => {
+    session.modeMenuAfterLobby = true;
+    if (!sendRoomMessage('returnLobby')) session.modeMenuAfterLobby = false;
   });
   document.querySelector('#leave-round')?.addEventListener('click', leaveRoom);
 }
