@@ -100,6 +100,58 @@ label { display: grid; gap: 6px; font-size: .92rem; opacity: .96; }
 .room-code { font-size: clamp(2.2rem, 12vw, 5rem); letter-spacing: .16em; font-weight: 900; text-align: center; }
 .join-url { word-break: break-all; opacity: .8; text-align: center; font-size: .9rem; }
 
+.helicopter-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+.helicopter-choice {
+  min-width: 0;
+  min-height: 112px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 2px;
+  padding: 7px 5px;
+  overflow: hidden;
+  border: 2px solid rgba(255,255,255,.15);
+  border-radius: 15px;
+  background: rgba(255,255,255,.075);
+  color: #fff;
+  transition: border-color .16s ease, background .16s ease, transform .16s ease;
+}
+.helicopter-choice.selected-helicopter {
+  border-color: #ffd25c;
+  background: rgba(244,185,66,.17);
+  transform: translateY(-2px);
+}
+.helicopter-art { display: block; width: 100%; max-width: 142px; height: 72px; overflow: visible; animation: copter-hover 1.65s ease-in-out infinite; }
+.helicopter-art-kamov { animation-delay: -.4s; }
+.helicopter-art-skycrane { animation-delay: -.8s; }
+.helicopter-art-firehawk { animation-delay: -1.2s; }
+.preview-rotor { transform-box: fill-box; transform-origin: center; animation: preview-rotor-spin .24s linear infinite; }
+.preview-rotor-reverse { animation-direction: reverse; animation-duration: .20s; }
+.preview-tail-rotor { transform-box: fill-box; transform-origin: center; animation: tail-rotor-spin .32s linear infinite; }
+.preview-bucket { transform-box: fill-box; transform-origin: 50% 0; animation: bucket-sway 1.3s ease-in-out infinite; }
+.helicopter-name { font-size: clamp(.67rem, 1.8vw, .83rem); font-weight: 820; white-space: nowrap; }
+.appearance-note { margin: 7px 0 0; color: rgba(255,255,255,.68); font-size: .77rem; text-align: center; }
+
+@keyframes copter-hover {
+  0%, 100% { transform: translateY(1px); }
+  50% { transform: translateY(-3px); }
+}
+
+@keyframes preview-rotor-spin {
+  0%, 100% { transform: scaleX(1); }
+  50% { transform: scaleX(.2); }
+}
+
+@keyframes tail-rotor-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes bucket-sway {
+  0%, 100% { transform: rotate(-7deg); }
+  50% { transform: rotate(7deg); }
+}
+
 .colors { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
 .color-button { aspect-ratio: 1; min-height: 44px; padding: 0; border: 4px solid transparent; }
 .color-button.selected { border-color: #fff; transform: scale(1.06); }
@@ -107,6 +159,8 @@ label { display: grid; gap: 6px; font-size: .92rem; opacity: .96; }
 
 .players { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
 .player-chip { display: flex; align-items: center; gap: 9px; padding: 10px 12px; border-radius: 12px; background: rgba(255,255,255,.08); }
+.player-details { min-width: 0; display: grid; gap: 1px; }
+.player-helicopter { color: rgba(255,255,255,.66); font-size: .72rem; }
 .swatch { width: 18px; height: 18px; border-radius: 50%; flex: 0 0 auto; }
 .badge { display: inline-block; padding: 4px 8px; border-radius: 999px; background: rgba(255,255,255,.1); font-size: .76rem; }
 
@@ -172,6 +226,9 @@ label { display: grid; gap: 6px; font-size: .92rem; opacity: .96; }
 @media (max-width: 520px) {
   .card { padding: 16px; }
   .mode-grid { grid-template-columns: 1fr; }
+  .helicopter-options { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .helicopter-choice { min-height: 96px; }
+  .helicopter-art { height: 63px; max-width: 155px; }
   .hud { gap: 4px; }
   .hud-group { gap: 4px; }
   .hud-pill { padding: 6px 8px; font-size: .7rem; }
@@ -183,7 +240,13 @@ label { display: grid; gap: 6px; font-size: .92rem; opacity: .96; }
   .stack { gap: 9px; }
   .mission-card { gap: 5px; padding: 10px; }
   .mission-card p { min-height: 0; }
+  .helicopter-choice { min-height: 83px; padding: 4px; }
+  .helicopter-art { height: 52px; }
   .hud-pill { padding: 5px 8px; font-size: .73rem; }
   .joystick-zone { bottom: calc(max(12px, env(safe-area-inset-bottom)) + 28px); width: 146px; height: 146px; }
   .joystick-knob { width: 64px; height: 64px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .helicopter-art, .preview-rotor, .preview-tail-rotor, .preview-bucket { animation: none; }
 }

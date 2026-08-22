@@ -7,6 +7,23 @@ export const HELICOPTER_COLORS = [
   { id: 'orange', label: 'Orange', value: '#fb8c00' },
 ];
 
+export const DEFAULT_HELICOPTER_TYPE = 'firehawk';
+
+export const HELICOPTER_TYPES = Object.freeze([
+  { id: 'chinook', label: 'Chinook', description: 'Twin-rotor heavy lifter', previewColor: '#e53935' },
+  { id: 'kamov', label: 'Kamov', description: 'Bucket and stacked rotors', previewColor: '#1e88e5' },
+  { id: 'skycrane', label: 'Skycrane', description: 'Long-boom air tanker', previewColor: '#fb8c00' },
+  { id: 'firehawk', label: 'Firehawk', description: 'Sleek rescue helicopter', previewColor: '#e53935' },
+].map((type) => Object.freeze(type)));
+
+export function isValidHelicopterType(typeId) {
+  return HELICOPTER_TYPES.some((type) => type.id === typeId);
+}
+
+export function normalizeHelicopterType(typeId) {
+  return isValidHelicopterType(typeId) ? typeId : DEFAULT_HELICOPTER_TYPE;
+}
+
 export const DIFFICULTIES = {
   easy: { label: 'Easy', spreadMs: 4200, initialFires: 3, maxFires: 14, roundSeconds: 150 },
   normal: { label: 'Normal', spreadMs: 3000, initialFires: 4, maxFires: 20, roundSeconds: 150 },

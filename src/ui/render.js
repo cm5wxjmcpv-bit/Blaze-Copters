@@ -1,3 +1,5 @@
+import { drawAnimatedHelicopter } from './helicopters.js';
+
 function drawRoad(ctx, points, width) {
   ctx.strokeStyle = '#9a744d';
   ctx.lineWidth = width + 5;
@@ -327,35 +329,32 @@ export function drawSimulation(ctx, sim) {
   for (const unit of sim.state.units) drawVehicle(ctx, unit, detailScale);
   for (const vehicle of sim.state.convoyVehicles) drawVehicle(ctx, vehicle, detailScale, true);
 
-  // Helicopters - temporary vector art until sprite sheets are designed.
+  const helicopterScale = Math.max(.76, Math.min(1.05, minSide / 560));
+  const animationTime = performance.now();
+
+  // Animated, color-matched helicopter characters share identical gameplay rules.
   for (const heli of sim.helicopters) {
-    ctx.save();
-    ctx.translate(heli.x, heli.y);
-    ctx.fillStyle = heli.color;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 22, 13, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillRect(16, -3, 24, 6);
-    ctx.strokeStyle = '#1f2523';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(-27, -18); ctx.lineTo(27, 18);
-    ctx.moveTo(-27, 18); ctx.lineTo(27, -18);
-    ctx.stroke();
-    ctx.restore();
+    const dropping = heli.water > 0
+      && Math.hypot(heli.x - sim.water.x, heli.y - sim.water.y) >= sim.water.radius
+      && sim.fires.some((fire) => Math.hypot(heli.x - fire.x, heli.y - fire.y) <= 30 + fire.radius);
+    const lowerEdge = drawAnimatedHelicopter(ctx, heli, animationTime, {
+      scale: helicopterScale,
+      dropping,
+    });
 
     const pct = Math.max(0, Math.min(1, heli.water / heli.capacity));
     const waterColor = pct >= .8 ? '#35c759' : pct >= .4 ? '#ffd43b' : '#ff453a';
+    const barY = heli.y + lowerEdge + 4;
     ctx.fillStyle = 'rgba(0,0,0,.5)';
-    ctx.fillRect(heli.x - 20, heli.y + 20, 40, 5);
+    ctx.fillRect(heli.x - 20, barY, 40, 5);
     ctx.fillStyle = waterColor;
-    ctx.fillRect(heli.x - 20, heli.y + 20, 40 * pct, 5);
+    ctx.fillRect(heli.x - 20, barY, 40 * pct, 5);
 
     if (heli.refillProgress > 0) {
       ctx.fillStyle = '#fff';
       ctx.font = 'bold 11px system-ui';
       ctx.textAlign = 'center';
-      ctx.fillText(`REFILL ${Math.round(heli.refillProgress)}%`, heli.x, heli.y - 27);
+      ctx.fillText(`REFILL ${Math.round(heli.refillProgress)}%`, heli.x, heli.y - 37);
     }
   }
 }

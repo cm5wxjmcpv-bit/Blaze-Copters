@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { DIFFICULTIES } from '../src/game/config.js';
+import {
+  DEFAULT_HELICOPTER_TYPE,
+  DIFFICULTIES,
+  HELICOPTER_TYPES,
+  isValidHelicopterType,
+  normalizeHelicopterType,
+} from '../src/game/config.js';
 import {
   DEFAULT_LEVEL_ID,
   DEFAULT_MODE_ID,
@@ -16,9 +22,16 @@ import {
   roundDurationForMode,
 } from '../src/game/modes.js';
 import { scaleForPlayers } from '../src/game/scaling.js';
-import { addPlayer, canStart, chooseColor, createRoom } from '../src/game/room-state.js';
+import {
+  addPlayer,
+  canStart,
+  chooseColor,
+  chooseHelicopter,
+  createRoom,
+} from '../src/game/room-state.js';
 import { BlazeSimulation } from '../src/game/simulation.js';
 import { attachJoystick } from '../src/ui/joystick.js';
+import { drawAnimatedHelicopter, helicopterPreviewMarkup } from '../src/ui/helicopters.js';
 import { drawSimulation } from '../src/ui/render.js';
 
 function players(count = 2) {
@@ -78,6 +91,26 @@ test('the shared mode registry exposes Classic Co-op and its starter level', () 
   assert.equal(levelsForMode(DEFAULT_MODE_ID)[0].id, DEFAULT_LEVEL_ID);
 });
 
+test('exactly four cosmetic helicopter characters are available with a safe Firehawk default', () => {
+  assert.deepEqual(HELICOPTER_TYPES.map((type) => type.id), [
+    'chinook', 'kamov', 'skycrane', 'firehawk',
+  ]);
+  assert.equal(DEFAULT_HELICOPTER_TYPE, 'firehawk');
+
+  for (const helicopter of HELICOPTER_TYPES) {
+    assert.equal(isValidHelicopterType(helicopter.id), true);
+    assert.ok(helicopter.description.length > 8);
+    const preview = helicopterPreviewMarkup(helicopter.id, '#43a047');
+    assert.match(preview, /<svg/);
+    assert.match(preview, /#43a047/);
+    assert.match(preview, /fill="#fff"/);
+    assert.match(preview, /preview-rotor/);
+  }
+
+  assert.equal(isValidHelicopterType('unknown'), false);
+  assert.equal(normalizeHelicopterType('unknown'), DEFAULT_HELICOPTER_TYPE);
+});
+
 test('the public mission registry exposes exactly five selectable modes and one valid level per mode', () => {
   const ids = playableModes().map((mode) => mode.id);
   assert.deepEqual(ids, [
@@ -110,6 +143,7 @@ test('local room helpers use the same mode, level, upgrades, and active-player r
   const room = createRoom({ roomCode: 'TEST', hostId: 'host-id' });
   assert.equal(room.mode, DEFAULT_MODE_ID);
   assert.equal(room.level, DEFAULT_LEVEL_ID);
+  assert.equal(room.players[0].helicopterType, DEFAULT_HELICOPTER_TYPE);
   assert.deepEqual(room.upgrades, { tank: 0, speed: 0, power: 0 });
   chooseColor(room, 'host-id', 'red');
 
@@ -121,6 +155,20 @@ test('local room helpers use the same mode, level, upgrades, and active-player r
 
   for (const player of room.players.slice(1)) player.connected = false;
   assert.equal(canStart(room, 'host-id'), true);
+});
+
+test('local players can choose the same cosmetic helicopter without affecting their required colors', () => {
+  const room = createRoom({ roomCode: 'TEST', hostId: 'host-id' });
+  addPlayer(room, { id: 'guest-id', name: 'Guest' });
+  chooseHelicopter(room, 'host-id', 'chinook');
+  chooseHelicopter(room, 'guest-id', 'chinook');
+  chooseColor(room, 'host-id', 'red');
+  chooseColor(room, 'guest-id', 'blue');
+
+  assert.deepEqual(room.players.map((player) => player.helicopterType), ['chinook', 'chinook']);
+  assert.equal(canStart(room, 'host-id'), true);
+  assert.throws(() => chooseHelicopter(room, 'host-id', 'unknown'), /Unknown helicopter/);
+  assert.throws(() => chooseHelicopter(room, 'missing', 'kamov'), /Player not found/);
 });
 
 test('a local room automatically selects the correct first level for any mission', () => {
@@ -154,6 +202,86 @@ test('a guest receives the same normalized fire positions and health as its host
     assert.ok(Math.abs(fire.x / host.width - guest.fires[index].x / guest.width) < 1e-9);
     assert.ok(Math.abs(fire.y / host.height - guest.fires[index].y / guest.height) < 1e-9);
   });
+});
+
+test('all four helicopter selections survive synchronized snapshots without changing gameplay stats', () => {
+  const selected = players(4).map((player, index) => ({
+    ...player,
+    helicopterType: HELICOPTER_TYPES[index].id,
+  }));
+  const host = new BlazeSimulation({
+    width: 1000,
+    height: 600,
+    players: selected,
+    upgrades: { tank: 2, speed: 1, power: 1 },
+  });
+  const guest = new BlazeSimulation({
+    width: 430,
+    height: 930,
+    players: selected,
+    upgrades: { tank: 2, speed: 1, power: 1 },
+    spawnInitialFires: false,
+  });
+
+  assert.deepEqual(host.helicopters.map((heli) => heli.helicopterType), [
+    'chinook', 'kamov', 'skycrane', 'firehawk',
+  ]);
+  assert.ok(host.helicopters.every((heli) => heli.capacity === 140));
+
+  const snapshot = host.createSnapshot();
+  assert.deepEqual(snapshot.helicopters.map((heli) => heli.helicopterType), [
+    'chinook', 'kamov', 'skycrane', 'firehawk',
+  ]);
+  assert.equal(guest.applySnapshot(snapshot), true);
+  assert.deepEqual(guest.helicopters.map((heli) => heli.helicopterType), [
+    'chinook', 'kamov', 'skycrane', 'firehawk',
+  ]);
+  assert.ok(guest.helicopters.every((heli) => heli.capacity === 140));
+});
+
+test('player synchronization updates cosmetic helicopter appearance without resetting water or movement', () => {
+  const selected = [{ ...players(1)[0], helicopterType: 'chinook' }];
+  const sim = new BlazeSimulation({ width: 1000, height: 600, players: selected });
+  const heli = sim.helicopters[0];
+  heli.water = 47;
+  heli.vx = .8;
+
+  sim.syncPlayers([{ ...selected[0], helicopterType: 'skycrane' }]);
+  assert.equal(sim.helicopters[0], heli);
+  assert.equal(heli.helicopterType, 'skycrane');
+  assert.equal(heli.water, 47);
+  assert.equal(heli.vx, .8);
+});
+
+test('every expressive helicopter renderer supports spinning rotors, eyes, and automatic water drops', () => {
+  for (const helicopter of HELICOPTER_TYPES) {
+    const calls = [];
+    const context = new Proxy({}, {
+      get(target, property) {
+        if (property in target) return target[property];
+        return (...args) => { calls.push({ method: property, args }); };
+      },
+      set(target, property, value) {
+        target[property] = value;
+        if (property === 'fillStyle') calls.push({ method: 'fillStyle', args: [value] });
+        return true;
+      },
+    });
+    const heli = {
+      id: helicopter.id,
+      helicopterType: helicopter.id,
+      color: '#43a047',
+      x: 120,
+      y: 100,
+      vx: .5,
+      vy: -.4,
+    };
+
+    assert.doesNotThrow(() => drawAnimatedHelicopter(context, heli, 800, { dropping: true }));
+    assert.ok(calls.some((call) => call.method === 'fillStyle' && call.args[0] === '#ffffff'), `${helicopter.id} has no eyes`);
+    assert.ok(calls.some((call) => call.method === 'ellipse'), `${helicopter.id} has no rotor animation`);
+    assert.ok(calls.some((call) => call.method === 'lineTo'), `${helicopter.id} has no animated water drops`);
+  }
 });
 
 test('the refill lake and helipad use the same normalized radii on every device', () => {

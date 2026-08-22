@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { DIFFICULTIES } from '../../src/game/config.js';
+import { DEFAULT_HELICOPTER_TYPE, DIFFICULTIES, HELICOPTER_TYPES } from '../../src/game/config.js';
 import {
   DEFAULT_LEVEL_ID,
   DEFAULT_MODE_ID,
@@ -84,7 +84,9 @@ const loadWorker = new Function(
   'DurableObject',
   'WebSocketPair',
   'Response',
+  'DEFAULT_HELICOPTER_TYPE',
   'DIFFICULTIES',
+  'HELICOPTER_TYPES',
   'DEFAULT_LEVEL_ID',
   'DEFAULT_MODE_ID',
   'GAME_LEVELS',
@@ -104,7 +106,9 @@ export const { GameRoom, worker, sanitizeSnapshot } = loadWorker(
   FakeDurableObject,
   FakeWebSocketPair,
   FakeResponse,
+  DEFAULT_HELICOPTER_TYPE,
   DIFFICULTIES,
+  HELICOPTER_TYPES,
   DEFAULT_LEVEL_ID,
   DEFAULT_MODE_ID,
   GAME_LEVELS,

@@ -1,4 +1,10 @@
-import { DIFFICULTIES, HELICOPTER_COLORS, UPGRADES } from './config.js';
+import {
+  DEFAULT_HELICOPTER_TYPE,
+  DIFFICULTIES,
+  HELICOPTER_COLORS,
+  UPGRADES,
+  normalizeHelicopterType,
+} from './config.js';
 import { controllerForMode, createModeState } from './mode-controllers.js';
 import {
   DEFAULT_LEVEL_ID,
@@ -146,6 +152,7 @@ export class BlazeSimulation {
       id: player.id,
       name: player.name,
       color: HELICOPTER_COLORS.find((c) => c.id === player.colorId)?.value || '#fff',
+      helicopterType: normalizeHelicopterType(player.helicopterType),
       x: this.helipad.x + offset.x,
       y: this.helipad.y + offset.y,
       vx: 0,
@@ -165,6 +172,7 @@ export class BlazeSimulation {
       if (heli) {
         heli.name = player.name;
         heli.color = HELICOPTER_COLORS.find((c) => c.id === player.colorId)?.value || heli.color;
+        heli.helicopterType = normalizeHelicopterType(player.helicopterType);
       } else {
         this.helicopters.push(this.createHelicopter(player, index));
       }
@@ -348,6 +356,7 @@ export class BlazeSimulation {
       })),
       helicopters: this.helicopters.map((heli) => ({
         id: heli.id,
+        helicopterType: normalizeHelicopterType(heli.helicopterType),
         x: normalizeX(heli.x),
         y: normalizeY(heli.y),
         vx: heli.vx,
@@ -439,6 +448,7 @@ export class BlazeSimulation {
           id: remoteHeli.id,
           name: 'Player',
           color: '#fff',
+          helicopterType: DEFAULT_HELICOPTER_TYPE,
           x: this.helipad.x,
           y: this.helipad.y,
           vx: 0,
@@ -455,6 +465,7 @@ export class BlazeSimulation {
           color: player
             ? HELICOPTER_COLORS.find((c) => c.id === player.colorId)?.value || fallback.color
             : fallback.color,
+          helicopterType: normalizeHelicopterType(player?.helicopterType ?? remoteHeli.helicopterType),
           x: denormalizeX(remoteHeli.x),
           y: denormalizeY(remoteHeli.y),
           vx: clamp(Number(remoteHeli.vx) || 0, -1, 1),
