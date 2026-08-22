@@ -1,4 +1,5 @@
 import { DIFFICULTIES, HELICOPTER_COLORS, UPGRADES } from './config.js';
+import { DEFAULT_LEVEL_ID, DEFAULT_MODE_ID, isValidLevel, isValidMode } from './modes.js';
 import { scaleForPlayers } from './scaling.js';
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -11,6 +12,9 @@ export class BlazeSimulation {
     players,
     difficulty = 'normal',
     round = 1,
+    mode = DEFAULT_MODE_ID,
+    level = DEFAULT_LEVEL_ID,
+    roundEndsAt = null,
     upgrades = {},
     spawnInitialFires = true,
   }) {
@@ -20,6 +24,11 @@ export class BlazeSimulation {
     this.difficulty = DIFFICULTIES[difficulty] || DIFFICULTIES.normal;
     this.scaling = scaleForPlayers(players.length, this.difficulty);
     this.round = round;
+    this.mode = isValidMode(mode) ? mode : DEFAULT_MODE_ID;
+    this.level = isValidLevel(this.mode, level) ? level : DEFAULT_LEVEL_ID;
+    this.roundEndsAt = Number.isFinite(Number(roundEndsAt)) && Number(roundEndsAt) > 0
+      ? Number(roundEndsAt)
+      : null;
     this.timeLeft = this.difficulty.roundSeconds;
     this.lastTick = performance.now();
     this.lastSpread = this.lastTick;
@@ -134,17 +143,27 @@ export class BlazeSimulation {
   }
 
   resize(width, height) {
+    if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+
     const sx = width / this.width;
     const sy = height / this.height;
+    const oldMinDimension = Math.max(1, Math.min(this.width, this.height));
+    const radialScale = Math.min(width, height) / oldMinDimension;
+
     for (const list of [this.helicopters, this.fires, this.burned, this.trees, this.cabins, this.campground]) {
       for (const item of list) { item.x *= sx; item.y *= sy; }
     }
+
+    for (const list of [this.fires, this.burned]) {
+      for (const item of list) item.radius *= radialScale;
+    }
+
     for (const item of [this.water, this.fireStation, this.helipad]) {
       item.x *= sx;
       item.y *= sy;
     }
-    this.water.radius *= Math.min(sx, sy);
-    this.helipad.radius *= Math.min(sx, sy);
+    this.water.radius *= radialScale;
+    this.helipad.radius *= radialScale;
     this.width = width;
     this.height = height;
   }
@@ -203,12 +222,18 @@ export class BlazeSimulation {
     const normalizeY = (value) => clamp(value / Math.max(1, this.height), 0, 1);
 
     return {
-      version: 1,
+      version: 2,
       round: this.round,
+      mode: this.mode,
+      level: this.level,
       timeLeft: this.timeLeft,
       complete: this.complete,
       extinguished: this.extinguished,
       spreadElapsedMs: Math.max(0, now - this.lastSpread),
+      map: {
+        waterRadius: this.water.radius / minDimension,
+        helipadRadius: this.helipad.radius / minDimension,
+      },
       fires: this.fires.map((fire) => ({
         x: normalizeX(fire.x),
         y: normalizeY(fire.y),
@@ -236,6 +261,7 @@ export class BlazeSimulation {
 
   applySnapshot(snapshot, now = performance.now()) {
     if (!snapshot || Number(snapshot.round) !== this.round) return false;
+    if (snapshot.mode !== this.mode || snapshot.level !== this.level) return false;
 
     const minDimension = Math.max(1, Math.min(this.width, this.height));
     const denormalizeX = (value) => clamp(Number(value) || 0, 0, 1) * this.width;
@@ -247,6 +273,11 @@ export class BlazeSimulation {
     this.extinguished = Math.max(0, Math.floor(Number(snapshot.extinguished) || 0));
     this.lastSpread = now - clamp(Number(snapshot.spreadElapsedMs) || 0, 0, 60000);
     this.lastTick = now;
+
+    if (snapshot.map) {
+      this.water.radius = clamp(Number(snapshot.map.waterRadius) || .1, .025, .35) * minDimension;
+      this.helipad.radius = clamp(Number(snapshot.map.helipadRadius) || .05, .015, .2) * minDimension;
+    }
 
     this.fires = Array.isArray(snapshot.fires)
       ? snapshot.fires.map((fire) => ({
@@ -306,9 +337,13 @@ export class BlazeSimulation {
 
   tick(now = performance.now()) {
     if (this.complete) return;
-    const dt = Math.min(.05, (now - this.lastTick) / 1000);
+    const elapsed = Math.max(0, (now - this.lastTick) / 1000);
+    const dt = Math.min(.05, elapsed);
     this.lastTick = now;
-    this.timeLeft = Math.max(0, this.timeLeft - dt);
+    this.timeLeft = Math.max(0, this.timeLeft - elapsed);
+    if (this.roundEndsAt) {
+      this.timeLeft = Math.min(this.timeLeft, Math.max(0, (this.roundEndsAt - Date.now()) / 1000));
+    }
     if (this.timeLeft <= 0) this.complete = true;
 
     const speed = 155 * (1 + this.upgrades.speed * .08);

@@ -1,15 +1,25 @@
 import { DIFFICULTIES, HELICOPTER_COLORS } from './game/config.js';
+import { GAME_MODES, levelsForMode } from './game/modes.js';
 import { BlazeSimulation } from './game/simulation.js';
 import { attachJoystick } from './ui/joystick.js';
 import { drawSimulation } from './ui/render.js';
 
 const app = document.querySelector('#app');
-const storedPlayerId = sessionStorage.getItem('blaze-copters-player-id');
+const PLAYER_ID_KEY = 'blaze-copters-player-id';
+const SESSION_TOKEN_KEY = 'blaze-copters-session-token';
+const ACTIVE_ROOM_KEY = 'blaze-copters-active-room';
+const PLAYER_NAME_KEY = 'blaze-copters-player-name';
+const MAX_RECONNECT_ATTEMPTS = 6;
+const storedPlayerId = sessionStorage.getItem(PLAYER_ID_KEY);
 const playerId = storedPlayerId || crypto.randomUUID();
-sessionStorage.setItem('blaze-copters-player-id', playerId);
+const sessionToken = sessionStorage.getItem(SESSION_TOKEN_KEY) || crypto.randomUUID();
+sessionStorage.setItem(PLAYER_ID_KEY, playerId);
+sessionStorage.setItem(SESSION_TOKEN_KEY, sessionToken);
 
 const session = {
   playerId,
+  sessionToken,
+  playerName: sessionStorage.getItem(PLAYER_NAME_KEY) || '',
   room: null,
   ws: null,
   sim: null,
@@ -18,6 +28,9 @@ const session = {
   input: { x: 0, y: 0 },
   resizeHandler: null,
   lastSnapshotSent: 0,
+  connectionGeneration: 0,
+  reconnectAttempts: 0,
+  reconnectTimer: null,
 };
 
 const escapeHtml = (value) => String(value ?? '')
@@ -44,6 +57,40 @@ function isMatchHost() {
   return Boolean(session.room && session.room.hostId === session.playerId);
 }
 
+function isRoomConnected() {
+  return session.ws?.readyState === WebSocket.OPEN;
+}
+
+function clearReconnectTimer() {
+  if (session.reconnectTimer) {
+    clearTimeout(session.reconnectTimer);
+    session.reconnectTimer = null;
+  }
+}
+
+function showConnectionNotice(message) {
+  let notice = document.querySelector('#connection-notice');
+  if (!notice) {
+    notice = document.createElement('div');
+    notice.id = 'connection-notice';
+    notice.className = 'connection-notice';
+    notice.setAttribute('role', 'status');
+    document.body.append(notice);
+  }
+  notice.textContent = message;
+}
+
+function hideConnectionNotice() {
+  document.querySelector('#connection-notice')?.remove();
+}
+
+function clearSavedRoom() {
+  sessionStorage.removeItem(ACTIVE_ROOM_KEY);
+  clearReconnectTimer();
+  session.reconnectAttempts = 0;
+  hideConnectionNotice();
+}
+
 function cleanupGameView() {
   if (session.resizeHandler) {
     window.removeEventListener('resize', session.resizeHandler);
@@ -64,21 +111,23 @@ function setRoomQuery(code) {
 }
 
 function sendRoomMessage(type, payload = {}) {
-  if (session.ws?.readyState !== WebSocket.OPEN) return false;
+  if (!isRoomConnected()) return false;
   session.ws.send(JSON.stringify({ type, ...payload }));
   return true;
 }
 
-async function roomExists(code) {
+async function roomPreview(code) {
   const response = await fetch(`/api/rooms/${encodeURIComponent(code)}/state`, { cache: 'no-store' });
-  return response.ok;
+  if (!response.ok) return null;
+  const data = await response.json();
+  return data.room || null;
 }
 
 async function createOnlineRoom(name) {
   const response = await fetch('/api/rooms', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ hostId: session.playerId, hostName: name }),
+    body: JSON.stringify({ hostId: session.playerId, hostName: name, sessionToken: session.sessionToken }),
   });
   if (!response.ok) throw new Error('Could not create a room.');
   const data = await response.json();
@@ -94,15 +143,36 @@ function applyRoomState(room) {
 
     if (session.view === 'round-end' && session.sim?.complete) return;
 
-    if (session.view !== 'game') {
+    const requiresNewSimulation = session.sim && (
+      session.sim.round !== room.round
+      || session.sim.mode !== room.mode
+      || session.sim.level !== room.level
+    );
+
+    if (session.view !== 'game' || requiresNewSimulation) {
       gameScreen();
     } else {
       session.sim?.syncPlayers(activePlayers);
+      if (session.sim) session.sim.roundEndsAt = room.roundEndsAt || null;
     }
     return;
   }
 
   if (room.phase === 'roundEnd') {
+    if (!session.sim) {
+      session.sim = new BlazeSimulation({
+        width: Math.max(1, window.innerWidth),
+        height: Math.max(1, window.innerHeight),
+        players: room.players.filter((player) => player.connected !== false),
+        difficulty: room.difficulty,
+        round: room.round,
+        mode: room.mode,
+        level: room.level,
+        upgrades: roomUpgrades(room),
+        spawnInitialFires: false,
+      });
+      session.sim.complete = true;
+    }
     endRoundScreen();
     return;
   }
@@ -110,17 +180,45 @@ function applyRoomState(room) {
   if (room.phase === 'lobby') lobbyScreen();
 }
 
-function connectToRoom(code, name) {
+function scheduleReconnect(code, name) {
+  if (session.intentionalLeave || session.reconnectTimer || !code) return;
+
+  if (session.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    cleanupGameView();
+    session.room = null;
+    session.sim = null;
+    clearSavedRoom();
+    setRoomQuery('');
+    homeScreen('Connection to the room was lost. Please create or join again.');
+    return;
+  }
+
+  session.reconnectAttempts += 1;
+  const attempt = session.reconnectAttempts;
+  const delay = Math.min(5000, 450 * (2 ** (attempt - 1)));
+  showConnectionNotice(`Reconnecting… ${attempt}/${MAX_RECONNECT_ATTEMPTS}`);
+
+  session.reconnectTimer = setTimeout(() => {
+    session.reconnectTimer = null;
+    connectToRoom(code, name, { reconnect: true }).catch(() => {
+      if (!session.intentionalLeave) scheduleReconnect(code, name);
+    });
+  }, delay);
+}
+
+function connectToRoom(code, name, { reconnect = false } = {}) {
   return new Promise((resolve, reject) => {
-    if (session.ws) {
-      session.intentionalLeave = true;
-      session.ws.close();
+    const generation = ++session.connectionGeneration;
+    const previous = session.ws;
+    if (previous) {
       session.ws = null;
+      previous.close();
     }
 
     session.intentionalLeave = false;
+    session.playerName = name;
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const params = new URLSearchParams({ playerId: session.playerId, name });
+    const params = new URLSearchParams({ playerId: session.playerId, name, token: session.sessionToken });
     const ws = new WebSocket(`${protocol}//${location.host}/api/rooms/${code}/ws?${params}`);
     session.ws = ws;
     let settled = false;
@@ -142,7 +240,13 @@ function connectToRoom(code, name) {
       }
 
       if (message.type === 'state') {
+        if (generation !== session.connectionGeneration) return;
         applyRoomState(message.room);
+        sessionStorage.setItem(ACTIVE_ROOM_KEY, code);
+        sessionStorage.setItem(PLAYER_NAME_KEY, name);
+        session.reconnectAttempts = 0;
+        clearReconnectTimer();
+        hideConnectionNotice();
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
@@ -157,7 +261,10 @@ function connectToRoom(code, name) {
       }
 
       if (message.type === 'matchSnapshot') {
-        if (!isMatchHost()) session.sim?.applySnapshot(message.snapshot);
+        if (!isMatchHost() || message.restore) {
+          const applied = session.sim?.applySnapshot(message.snapshot);
+          if (applied && session.view === 'round-end') endRoundScreen();
+        }
         return;
       }
 
@@ -174,17 +281,16 @@ function connectToRoom(code, name) {
 
     ws.addEventListener('close', () => {
       clearTimeout(timeout);
+      if (generation !== session.connectionGeneration) return;
       if (session.ws === ws) session.ws = null;
       if (!settled) {
         settled = true;
         reject(new Error('Could not connect to that room.'));
       }
-      if (!session.intentionalLeave && session.view !== 'home') {
-        cleanupGameView();
-        session.room = null;
-        session.sim = null;
-        setRoomQuery('');
-        homeScreen('Connection to the room was lost. You can create or join again.');
+      if (!session.intentionalLeave && session.room && session.view !== 'home') {
+        scheduleReconnect(code, name);
+      } else if (reconnect && !session.intentionalLeave && session.room) {
+        scheduleReconnect(code, name);
       }
     });
   });
@@ -192,10 +298,15 @@ function connectToRoom(code, name) {
 
 function leaveRoom() {
   session.intentionalLeave = true;
+  clearReconnectTimer();
+  const socket = session.ws;
   sendRoomMessage('leave');
-  setTimeout(() => session.ws?.close(), 80);
+  session.connectionGeneration += 1;
+  session.ws = null;
+  setTimeout(() => socket?.close(), 80);
   session.room = null;
   session.sim = null;
+  clearSavedRoom();
   setRoomQuery('');
   homeScreen();
 }
@@ -259,7 +370,11 @@ function homeScreen(message = '') {
     createButton.disabled = true;
     status.textContent = `Looking for room ${code}…`;
     try {
-      if (!(await roomExists(code))) throw new Error(`Room ${code} was not found.`);
+      const preview = await roomPreview(code);
+      if (!preview) throw new Error(`Room ${code} was not found.`);
+      if (!preview.joinable && sessionStorage.getItem(ACTIVE_ROOM_KEY) !== code) {
+        throw new Error(preview.phase === 'lobby' ? 'That room is full.' : 'Mission already in progress. Join between rounds.');
+      }
       setRoomQuery(code);
       await connectToRoom(code, name);
     } catch (error) {
@@ -290,6 +405,8 @@ function lobbyScreen() {
   const joinUrl = `${location.origin}${location.pathname}?room=${room.roomCode}`;
   const canStart = me.isHost && activePlayers.length >= 1 && activePlayers.every((player) => player.colorId);
   const upgrades = roomUpgrades(room);
+  const availableModes = Object.values(GAME_MODES);
+  const availableLevels = levelsForMode(room.mode);
 
   app.innerHTML = `
     <section class="screen">
@@ -299,9 +416,22 @@ function lobbyScreen() {
         <div class="join-url">${escapeHtml(joinUrl)}</div>
         <div class="notice small">Shared multiplayer match connected. Fires, water, helicopter positions, and the round timer are synchronized for the room.</div>
 
-        <label>Difficulty
-          <select id="difficulty" ${me.isHost ? '' : 'disabled'}>
-            ${Object.entries(DIFFICULTIES).map(([id, value]) => `<option value="${id}" ${room.difficulty === id ? 'selected' : ''}>${escapeHtml(value.label)}</option>`).join('')}
+        <div class="settings-grid">
+          <label>Game mode
+            <select id="game-mode" ${me.isHost && availableModes.length > 1 ? '' : 'disabled'}>
+              ${availableModes.map((mode) => `<option value="${mode.id}" ${room.mode === mode.id ? 'selected' : ''}>${escapeHtml(mode.label)}</option>`).join('')}
+            </select>
+          </label>
+          <label>Difficulty
+            <select id="difficulty" ${me.isHost ? '' : 'disabled'}>
+              ${Object.entries(DIFFICULTIES).map(([id, value]) => `<option value="${id}" ${room.difficulty === id ? 'selected' : ''}>${escapeHtml(value.label)}</option>`).join('')}
+            </select>
+          </label>
+        </div>
+
+        <label>Level
+          <select id="game-level" ${me.isHost && availableLevels.length > 1 ? '' : 'disabled'}>
+            ${availableLevels.map((level) => `<option value="${level.id}" ${room.level === level.id ? 'selected' : ''}>${escapeHtml(level.label)}</option>`).join('')}
           </select>
         </label>
 
@@ -333,6 +463,12 @@ function lobbyScreen() {
   });
   document.querySelector('#difficulty')?.addEventListener('change', (event) => {
     sendRoomMessage('setDifficulty', { difficulty: event.target.value });
+  });
+  document.querySelector('#game-mode')?.addEventListener('change', (event) => {
+    sendRoomMessage('setMode', { mode: event.target.value });
+  });
+  document.querySelector('#game-level')?.addEventListener('change', (event) => {
+    sendRoomMessage('setLevel', { level: event.target.value });
   });
   document.querySelector('#start-game')?.addEventListener('click', () => sendRoomMessage('start'));
   document.querySelector('#leave-game').addEventListener('click', leaveRoom);
@@ -403,8 +539,11 @@ function gameScreen() {
     players: activePlayers,
     difficulty: room.difficulty,
     round: room.round,
+    mode: room.mode,
+    level: room.level,
+    roundEndsAt: room.roundEndsAt,
     upgrades: roomUpgrades(room),
-    spawnInitialFires: isMatchHost(),
+    spawnInitialFires: isMatchHost() && !room.hasSnapshot,
   });
   session.resizeHandler = resize;
   session.lastSnapshotSent = 0;
@@ -442,16 +581,19 @@ function gameScreen() {
 
   const sendSnapshot = (now) => {
     if (!isMatchHost() || !session.sim) return;
-    sendRoomMessage('matchSnapshot', { snapshot: session.sim.createSnapshot(now) });
-    session.lastSnapshotSent = now;
+    if (sendRoomMessage('matchSnapshot', { snapshot: session.sim.createSnapshot(now) })) {
+      session.lastSnapshotSent = now;
+    }
   };
 
   const loop = (now) => {
     if (!session.sim || session.view !== 'game') return;
 
-    if (isMatchHost()) {
+    if (isMatchHost() && isRoomConnected()) {
       session.sim.tick(now);
       if (now - session.lastSnapshotSent >= 70 || session.sim.complete) sendSnapshot(now);
+    } else if (session.room?.roundEndsAt) {
+      session.sim.timeLeft = Math.max(0, (session.room.roundEndsAt - Date.now()) / 1000);
     }
 
     drawSimulation(ctx, session.sim);
@@ -542,3 +684,14 @@ function endRoundScreen() {
 }
 
 homeScreen();
+
+const savedRoom = sessionStorage.getItem(ACTIVE_ROOM_KEY);
+const savedName = sessionStorage.getItem(PLAYER_NAME_KEY);
+if (savedRoom && savedName && requestedRoomCode() === savedRoom) {
+  const status = document.querySelector('#home-status');
+  if (status) status.textContent = 'Restoring your game…';
+  connectToRoom(savedRoom, savedName, { reconnect: true }).catch(() => {
+    clearSavedRoom();
+    homeScreen('Your previous room could not be restored. Please create or join again.');
+  });
+}
