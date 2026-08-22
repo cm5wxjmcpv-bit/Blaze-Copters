@@ -5,7 +5,7 @@ const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
 export class BlazeSimulation {
-  constructor({ width, height, players, difficulty = 'normal', round = 1 }) {
+  constructor({ width, height, players, difficulty = 'normal', round = 1, upgrades = {} }) {
     this.width = width;
     this.height = height;
     this.players = players;
@@ -13,12 +13,16 @@ export class BlazeSimulation {
     this.scaling = scaleForPlayers(players.length, this.difficulty);
     this.round = round;
     this.timeLeft = this.difficulty.roundSeconds;
-    this.lastSpread = 0;
     this.lastTick = performance.now();
+    this.lastSpread = this.lastTick;
     this.complete = false;
     this.saved = 0;
     this.extinguished = 0;
-    this.upgrades = { tank: 0, refill: 0, speed: 0, drop: 0, power: 0, recovery: 0 };
+    this.upgrades = {
+      tank: Math.max(0, Number(upgrades.tank) || 0),
+      speed: Math.max(0, Number(upgrades.speed) || 0),
+      power: Math.max(0, Number(upgrades.power) || 0),
+    };
 
     this.water = { x: width * .12, y: height * .74, radius: Math.max(52, Math.min(width, height) * .075) };
     this.cabins = [
@@ -32,20 +36,46 @@ export class BlazeSimulation {
     }));
     this.fires = [];
     this.burned = [];
-    this.helicopters = players.map((player, i) => ({
+    this.helicopters = players.map((player, i) => this.createHelicopter(player, i));
+
+    let attempts = 0;
+    while (this.fires.length < this.scaling.initialFires && attempts < this.scaling.initialFires * 12) {
+      this.spawnFire();
+      attempts += 1;
+    }
+  }
+
+  createHelicopter(player, index = 0) {
+    const capacity = 100 * (1 + this.upgrades.tank * .2);
+    return {
       id: player.id,
       name: player.name,
       color: HELICOPTER_COLORS.find((c) => c.id === player.colorId)?.value || '#fff',
-      x: width * .2 + (i % 3) * 55,
-      y: height * .22 + Math.floor(i / 3) * 55,
+      x: this.width * .2 + (index % 3) * 55,
+      y: this.height * .22 + Math.floor(index / 3) * 55,
       vx: 0,
       vy: 0,
-      water: 100,
-      capacity: 100,
+      water: capacity,
+      capacity,
       refillProgress: 0,
-    }));
+    };
+  }
 
-    for (let i = 0; i < this.scaling.initialFires; i++) this.spawnFire();
+  syncPlayers(players) {
+    const activeIds = new Set(players.map((player) => player.id));
+    this.helicopters = this.helicopters.filter((heli) => activeIds.has(heli.id));
+
+    players.forEach((player, index) => {
+      const heli = this.helicopters.find((item) => item.id === player.id);
+      if (heli) {
+        heli.name = player.name;
+        heli.color = HELICOPTER_COLORS.find((c) => c.id === player.colorId)?.value || heli.color;
+      } else {
+        this.helicopters.push(this.createHelicopter(player, index));
+      }
+    });
+
+    this.players = players;
   }
 
   resize(width, height) {
@@ -68,28 +98,41 @@ export class BlazeSimulation {
   }
 
   spawnFire(x, y) {
-    if (this.fires.length >= this.scaling.maxFires) return;
-    const margin = 80;
-    const fx = x ?? margin + Math.random() * Math.max(20, this.width - margin * 2);
-    const fy = y ?? margin + Math.random() * Math.max(20, this.height - margin * 2);
-    if (distance({ x: fx, y: fy }, this.water) < this.water.radius * 1.5) return this.spawnFire();
-    this.fires.push({ x: fx, y: fy, hp: 100, radius: 22 + Math.random() * 8, born: performance.now() });
+    if (this.fires.length >= this.scaling.maxFires) return false;
+
+    const margin = Math.min(80, Math.max(24, Math.min(this.width, this.height) * .16));
+    const minX = margin;
+    const maxX = Math.max(minX, this.width - margin);
+    const minY = margin;
+    const maxY = Math.max(minY, this.height - margin);
+    const suppliedPosition = Number.isFinite(x) && Number.isFinite(y);
+    const attempts = suppliedPosition ? 1 : 16;
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const fx = suppliedPosition
+        ? clamp(x, minX, maxX)
+        : minX + Math.random() * Math.max(1, maxX - minX);
+      const fy = suppliedPosition
+        ? clamp(y, minY, maxY)
+        : minY + Math.random() * Math.max(1, maxY - minY);
+
+      if (distance({ x: fx, y: fy }, this.water) < this.water.radius * 1.5) continue;
+
+      this.fires.push({ x: fx, y: fy, hp: 100, radius: 22 + Math.random() * 8, born: performance.now() });
+      return true;
+    }
+
+    return false;
   }
 
   applyUpgrade(id) {
-    if (!(id in this.upgrades)) return;
+    if (!(id in this.upgrades)) return false;
     this.upgrades[id] += 1;
-    if (id === 'tank') {
-      for (const heli of this.helicopters) {
-        heli.capacity *= 1.2;
-        heli.water = heli.capacity;
-      }
-    }
+    return true;
   }
 
   upgradeChoices() {
-    const shuffled = [...UPGRADES].sort(() => Math.random() - .5);
-    return shuffled.slice(0, 2);
+    return [...UPGRADES];
   }
 
   tick(now = performance.now()) {
@@ -100,9 +143,9 @@ export class BlazeSimulation {
     if (this.timeLeft <= 0) this.complete = true;
 
     const speed = 155 * (1 + this.upgrades.speed * .08);
-    const dropRadius = 30 * (1 + this.upgrades.drop * .12);
+    const dropRadius = 30;
     const extinguishPerSecond = 48 * (1 + this.upgrades.power * .15);
-    const refillRate = 42 / Math.max(.35, 1 - this.upgrades.refill * .15);
+    const refillRate = 42;
 
     for (const heli of this.helicopters) {
       heli.x = clamp(heli.x + heli.vx * speed * dt, 20, this.width - 20);
@@ -141,7 +184,7 @@ export class BlazeSimulation {
     }
     this.fires = this.fires.filter((fire) => fire.hp > 0);
 
-    const recoverySeconds = 16 / (1 + this.upgrades.recovery * .2);
+    const recoverySeconds = 16;
     for (const patch of this.burned) patch.age += dt;
     this.burned = this.burned.filter((patch) => patch.age < recoverySeconds);
 
