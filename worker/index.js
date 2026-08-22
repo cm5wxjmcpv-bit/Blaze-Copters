@@ -21,6 +21,13 @@ function connectedPlayers(room) {
   return room.players.filter((player) => player.connected !== false);
 }
 
+function ensureConnectedHost(room) {
+  const currentHost = room.players.find((player) => player.id === room.hostId && player.connected !== false);
+  const nextHost = currentHost ?? connectedPlayers(room)[0] ?? null;
+  room.hostId = nextHost?.id ?? null;
+  for (const player of room.players) player.isHost = player.id === room.hostId;
+}
+
 export class GameRoom extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
@@ -111,6 +118,7 @@ export class GameRoom extends DurableObject {
         player.name = playerName;
         player.connected = true;
       }
+      ensureConnectedHost(room);
 
       const pair = new WebSocketPair();
       const [client, server] = Object.values(pair);
@@ -180,6 +188,7 @@ export class GameRoom extends DurableObject {
         return;
       }
       room.players = active;
+      ensureConnectedHost(room);
       room.phase = "playing";
       await this.broadcastRoom(room);
       return;
@@ -195,11 +204,7 @@ export class GameRoom extends DurableObject {
 
     if (message.type === "leave") {
       room.players = room.players.filter((item) => item.id !== playerId);
-      if (room.hostId === playerId) {
-        const nextHost = room.players.find((item) => item.connected !== false) ?? room.players[0] ?? null;
-        room.hostId = nextHost?.id ?? null;
-        for (const item of room.players) item.isHost = item.id === room.hostId;
-      }
+      ensureConnectedHost(room);
       await this.broadcastRoom(room);
     }
   }
@@ -216,6 +221,7 @@ export class GameRoom extends DurableObject {
 
     player.connected = false;
     player.colorId = null;
+    ensureConnectedHost(room);
     await this.broadcastRoom(room);
   }
 
