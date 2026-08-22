@@ -5,7 +5,15 @@ const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
 export class BlazeSimulation {
-  constructor({ width, height, players, difficulty = 'normal', round = 1, upgrades = {} }) {
+  constructor({
+    width,
+    height,
+    players,
+    difficulty = 'normal',
+    round = 1,
+    upgrades = {},
+    spawnInitialFires = true,
+  }) {
     this.width = width;
     this.height = height;
     this.players = players;
@@ -53,10 +61,12 @@ export class BlazeSimulation {
     this.burned = [];
     this.helicopters = players.map((player, i) => this.createHelicopter(player, i));
 
-    let attempts = 0;
-    while (this.fires.length < this.scaling.initialFires && attempts < this.scaling.initialFires * 12) {
-      this.spawnFire();
-      attempts += 1;
+    if (spawnInitialFires) {
+      let attempts = 0;
+      while (this.fires.length < this.scaling.initialFires && attempts < this.scaling.initialFires * 12) {
+        this.spawnFire();
+        attempts += 1;
+      }
     }
   }
 
@@ -120,6 +130,7 @@ export class BlazeSimulation {
     });
 
     this.players = players;
+    this.scaling = scaleForPlayers(players.length, this.difficulty);
   }
 
   resize(width, height) {
@@ -184,6 +195,113 @@ export class BlazeSimulation {
 
   upgradeChoices() {
     return [...UPGRADES];
+  }
+
+  createSnapshot(now = performance.now()) {
+    const minDimension = Math.max(1, Math.min(this.width, this.height));
+    const normalizeX = (value) => clamp(value / Math.max(1, this.width), 0, 1);
+    const normalizeY = (value) => clamp(value / Math.max(1, this.height), 0, 1);
+
+    return {
+      version: 1,
+      round: this.round,
+      timeLeft: this.timeLeft,
+      complete: this.complete,
+      extinguished: this.extinguished,
+      spreadElapsedMs: Math.max(0, now - this.lastSpread),
+      fires: this.fires.map((fire) => ({
+        x: normalizeX(fire.x),
+        y: normalizeY(fire.y),
+        hp: fire.hp,
+        radius: fire.radius / minDimension,
+      })),
+      burned: this.burned.map((patch) => ({
+        x: normalizeX(patch.x),
+        y: normalizeY(patch.y),
+        age: patch.age,
+        radius: patch.radius / minDimension,
+      })),
+      helicopters: this.helicopters.map((heli) => ({
+        id: heli.id,
+        x: normalizeX(heli.x),
+        y: normalizeY(heli.y),
+        vx: heli.vx,
+        vy: heli.vy,
+        water: heli.water,
+        capacity: heli.capacity,
+        refillProgress: heli.refillProgress,
+      })),
+    };
+  }
+
+  applySnapshot(snapshot, now = performance.now()) {
+    if (!snapshot || Number(snapshot.round) !== this.round) return false;
+
+    const minDimension = Math.max(1, Math.min(this.width, this.height));
+    const denormalizeX = (value) => clamp(Number(value) || 0, 0, 1) * this.width;
+    const denormalizeY = (value) => clamp(Number(value) || 0, 0, 1) * this.height;
+    const playersById = new Map(this.players.map((player) => [player.id, player]));
+
+    this.timeLeft = clamp(Number(snapshot.timeLeft) || 0, 0, this.difficulty.roundSeconds);
+    this.complete = Boolean(snapshot.complete);
+    this.extinguished = Math.max(0, Math.floor(Number(snapshot.extinguished) || 0));
+    this.lastSpread = now - clamp(Number(snapshot.spreadElapsedMs) || 0, 0, 60000);
+    this.lastTick = now;
+
+    this.fires = Array.isArray(snapshot.fires)
+      ? snapshot.fires.map((fire) => ({
+          x: denormalizeX(fire.x),
+          y: denormalizeY(fire.y),
+          hp: clamp(Number(fire.hp) || 0, 0, 100),
+          radius: clamp(Number(fire.radius) || .03, .005, .12) * minDimension,
+          born: now,
+        }))
+      : [];
+
+    this.burned = Array.isArray(snapshot.burned)
+      ? snapshot.burned.map((patch) => ({
+          x: denormalizeX(patch.x),
+          y: denormalizeY(patch.y),
+          age: clamp(Number(patch.age) || 0, 0, 16),
+          radius: clamp(Number(patch.radius) || .03, .005, .15) * minDimension,
+        }))
+      : [];
+
+    if (Array.isArray(snapshot.helicopters)) {
+      this.helicopters = snapshot.helicopters.map((remoteHeli, index) => {
+        const player = playersById.get(remoteHeli.id);
+        const fallback = player ? this.createHelicopter(player, index) : {
+          id: remoteHeli.id,
+          name: 'Player',
+          color: '#fff',
+          x: this.helipad.x,
+          y: this.helipad.y,
+          vx: 0,
+          vy: 0,
+          water: 100,
+          capacity: 100,
+          refillProgress: 0,
+        };
+
+        return {
+          ...fallback,
+          id: remoteHeli.id,
+          name: player?.name || fallback.name,
+          color: player
+            ? HELICOPTER_COLORS.find((c) => c.id === player.colorId)?.value || fallback.color
+            : fallback.color,
+          x: denormalizeX(remoteHeli.x),
+          y: denormalizeY(remoteHeli.y),
+          vx: clamp(Number(remoteHeli.vx) || 0, -1, 1),
+          vy: clamp(Number(remoteHeli.vy) || 0, -1, 1),
+          water: Math.max(0, Number(remoteHeli.water) || 0),
+          capacity: Math.max(1, Number(remoteHeli.capacity) || 100),
+          refillProgress: clamp(Number(remoteHeli.refillProgress) || 0, 0, 100),
+        };
+      });
+    }
+
+    return true;
   }
 
   tick(now = performance.now()) {
