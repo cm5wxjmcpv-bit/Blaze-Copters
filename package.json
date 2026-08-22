@@ -6,7 +6,8 @@
   "scripts": {
     "build": "rm -rf dist && mkdir -p dist && cp index.html styles.css dist/ && cp -R src dist/src",
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "test": "node --test tests/*.test.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"

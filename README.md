@@ -1,68 +1,47 @@
 # Blaze Copters
 
-Blaze Copters is a simple cross-platform cooperative firefighting mini game for 1-6 players in a web browser.
+Blaze Copters is a cooperative browser firefighting game for one to six players. Phones, tablets, and computers can join the same four-character room and fight the same fires.
 
-## Current prototype goals
+## Current game
 
-- Host creates a room and receives a 4-character room code.
-- Up to six players join from phones, tablets, or computers.
-- Every player chooses one unique helicopter color.
-- Host chooses difficulty and starts the match.
-- Mobile: one touch joystick only.
-- Desktop: arrow keys or WASD.
-- Water drops automatically while flying over fire.
-- Refill automatically by hovering over water for a refill timer.
-- Fire spreads over time and scales with player count.
-- Burned ground recovers toward green after a delay.
-- Between rounds the team votes between two upgrades.
-- Story co-op and versus mode are planned after the core multiplayer loop is stable.
+- Classic Co-op on the Starter Training Grounds map.
+- One to six players, with a different helicopter color for each player.
+- Touch joystick on mobile; arrow keys or WASD on a computer.
+- Automatic water drops over fires and automatic refills over the lake.
+- Fire spread and difficulty scale with the number of connected players.
+- Shared fires, fire health, helicopters, water levels, map dimensions, and round timers.
+- Three shared upgrades between rounds: more water, faster helicopter, or stronger water.
+- Automatic reconnection and recovery of an in-progress round.
 
-## Architecture plan
+## Multiplayer architecture
 
-### Phase 1 — GitHub / local prototype
+Cloudflare Workers serves the static game and routes room requests to a Durable Object. Each room owns its players, authenticated player sessions, host, selected mode, selected level, difficulty, upgrades, round deadlines, and a recent recoverable match snapshot.
 
-Static HTML, CSS, Canvas, and JavaScript. The current build uses temporary vector shapes so gameplay can be tuned before sprite art is created.
+The current room host runs the lightweight gameplay simulation. The Durable Object validates and rebroadcasts match snapshots, enforces room permissions and the round deadline, restores reconnecting players, automatically replaces a disconnected or stalled host, and expires abandoned rooms.
 
-### Phase 2 — Cloudflare multiplayer
+Game modes and their available levels are registered in `src/game/modes.js`. Both the browser client and the Cloudflare Worker use that registry, so new modes must be added there before they can be selected or synchronized.
 
-Planned Cloudflare stack:
+## Local development
 
-- Workers Static Assets: serves the web game.
-- Worker API: room creation/join endpoints.
-- One Durable Object per active game room.
-- WebSockets: real-time player input and authoritative room state.
-- Host remains the room owner, but the Durable Object runs the match so a host phone is not the server.
-
-The client code will send **input changes**, not a continuous flood of position messages. The server will own fire spread, water hits, timers, votes, player colors, and round state.
-
-## Run locally
-
-From the repository folder:
+Install the development dependency, build the static assets, and start the local Cloudflare Worker:
 
 ```bash
-python3 -m http.server 8080
+npm install
+npm run build
+npm run dev
 ```
 
-Then open `http://localhost:8080`.
+Wrangler runs both the browser game and its room/WebSocket endpoints locally. A static-only HTTP server cannot provide multiplayer room APIs.
 
-## Current status
+Run the regression suite with:
 
-The local single-device prototype includes:
+```bash
+npm test
+```
 
-- Main menu
-- Create-game flow
-- 4-character room code
-- Unique helicopter color selection
-- Difficulty selection
-- Host-only Start button
-- Canvas game map
-- Keyboard movement
-- Touch joystick
-- Automatic water drop
-- Timed automatic refill
-- Fire spread
-- Player-count difficulty scaling
-- Burned-ground recovery
-- End-of-round upgrade choices
+Build and deploy with:
 
-Online join, QR rendering, shared multiplayer state, reconnects, and real voting will be connected when the Cloudflare phase begins.
+```bash
+npm run build
+npm run deploy
+```
